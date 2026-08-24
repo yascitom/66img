@@ -14,7 +14,7 @@
 // 安全：密钥不出服务端；每个 action 都校验身份（密码或登录令牌）；
 //       key 强制 upweb/ 前缀白名单 + 安全字符集，杜绝越权操作其他对象；
 //       init 签发 HMAC 会话令牌绑定 key/uploadId/声明大小/分片上限，
-//       complete 前 ListParts 核验实际分片，防「声明小传大」。
+//       complete 前 ListParts 逐片核验实际分片，防「声明小传大」与「检查后偷换分片」。
 // 环境变量：与 sign.js 相同，新增（可选）：
 //   PART_SIZE_MB  分片大小，默认 10（MB），范围 5~100
 // ============================================================
@@ -73,14 +73,14 @@ function makeObjectKey(filename) {
 // 密码校验：SHA-256 哈希后再比对（避免长度/前缀泄露），
 // 失败统一延迟 ~0.4s 再返回 401，拖慢在线暴力破解。
 // ------------------------------------------------------------
+async function sha256Hex(s) {
+  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(s == null ? '' : s)));
+  return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 async function pwdOk(input, expected) {
   if (!expected) return true; // 仅在显式 ALLOW_ANONYMOUS_UPLOAD=true 的匿名模式下才会为空
-  const enc = new TextEncoder();
-  async function h(s) {
-    const d = await crypto.subtle.digest('SHA-256', enc.encode(String(s == null ? '' : s)));
-    return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
-  }
-  return (await h(input)) === (await h(expected));
+  return (await sha256Hex(input)) === (await sha256Hex(expected));
 }
 
 async function rejectAuth() {
@@ -131,15 +131,38 @@ async function readToken(token, secret) {
   } catch { return null; }
 }
 
-// 统一鉴权：密码 或 登录令牌（body.auth）任一通过即可（匿名模式下密码为空恒通过）
+// 令牌派生密钥：HMAC(SK, 版本标识 | Bucket | 密码哈希)——改密码即作废全部令牌，
+// 不同 Bucket 的部署实例令牌互不通用；与 sign.js 相同实现，不新增环境变量。
+async function tokenKey(env) {
+  const fp = await sha256Hex(env.UPLOAD_PASSWORD || '');
+  return hmacSha256B64url(env.OSS_ACCESS_KEY_SECRET, 'yunwo-auth-v1|' + env.OSS_BUCKET + '|' + fp);
+}
+
+// 统一鉴权：返回 'pwd'（密码通过）/ 'token'（令牌通过）/ null（失败）
 async function verifyAuth(body, env) {
-  if (await pwdOk(body.password, env.UPLOAD_PASSWORD)) return true;
-  const p = await readToken(body.auth, env.OSS_ACCESS_KEY_SECRET);
-  return !!(p && p.t === 'auth');
+  if (await pwdOk(body.password, env.UPLOAD_PASSWORD)) return 'pwd';
+  const p = await readToken(body.auth, await tokenKey(env));
+  return (p && p.t === 'auth') ? 'token' : null;
+}
+
+// 请求硬化：限制请求体与敏感字段长度（与 sign.js 相同实现）
+function badInput(body) {
+  if (!body || typeof body !== 'object') return '请求体必须是 JSON 对象';
+  const limits = { password: 128, auth: 2048, session: 2048, token: 2048, filename: 256, uploadId: 256, mime: 128 };
+  for (const k of Object.keys(limits)) {
+    if (typeof body[k] === 'string' && body[k].length > limits[k]) return '参数非法';
+  }
+  if (Array.isArray(body.parts) && body.parts.length > 10000) return '参数非法';
+  return '';
+}
+function bodyTooLarge(request) {
+  const cl = parseInt(request.headers.get('Content-Length') || '0', 10);
+  // 分片合并请求可能携带较多 ETag，上限放宽到 256KB
+  return cl > 256 * 1024;
 }
 
 // ------------------------------------------------------------
-// 分片会话令牌：init 时签发，绑定 key/uploadId/声明大小/分片上限，
+// 分片会话令牌：init 时签发，绑定 key/uploadId/声明大小/分片上限/分片尺寸，
 // part/complete/abort 必须持有匹配的令牌，杜绝「声明小传大」与越权会话操作。
 // ------------------------------------------------------------
 const MP_TOKEN_TTL = 7 * 24 * 3600; // 与前端断点续传任务存活期一致
@@ -151,13 +174,14 @@ async function makeMpToken(env, key, uploadId, size, partSize) {
     u: uploadId,
     s: size,                                   // 声明的文件总大小
     m: Math.ceil(size / partSize),             // 允许的最大分片数
+    z: partSize,                               // 分片大小（complete 逐片核验用）
     e: Math.floor(Date.now() / 1000) + MP_TOKEN_TTL,
-  }, env.OSS_ACCESS_KEY_SECRET);
+  }, await tokenKey(env));
 }
 
 // 校验会话令牌且与本次 key/uploadId 匹配；通过返回 payload，否则返回 null
 async function mpSession(body, key, uploadId, env) {
-  const p = await readToken(body.session, env.OSS_ACCESS_KEY_SECRET);
+  const p = await readToken(body.session, await tokenKey(env));
   if (!p || p.t !== 'mp' || p.k !== key || p.u !== uploadId) return null;
   return p;
 }
@@ -259,12 +283,16 @@ async function handle(request, env) {
   const cfgErr = authConfigError(env);
   if (cfgErr) return jsonResponse({ error: cfgErr }, 500);
 
+  if (bodyTooLarge(request)) return jsonResponse({ error: '请求体过大' }, 413);
+
   let body;
   try {
     body = await request.json();
   } catch {
     return jsonResponse({ error: '请求体必须是 JSON' }, 400);
   }
+  const inputErr = badInput(body);
+  if (inputErr) return jsonResponse({ error: inputErr }, 400);
 
   // 所有分片操作都校验身份（密码或登录令牌，哈希比对 + 失败延迟）
   if (!(await verifyAuth(body, env))) {
@@ -294,7 +322,7 @@ async function handle(request, env) {
       const uploadId = (xml.match(/<UploadId>([^<]+)<\/UploadId>/) || [])[1];
       if (!uploadId) throw new Error('OSS 未返回 UploadId');
 
-      // 签发会话令牌：绑定本 key/uploadId、声明大小与分片数上限
+      // 签发会话令牌：绑定本 key/uploadId、声明大小、分片数上限与分片尺寸
       const session = await makeMpToken(env, key, uploadId, size, partSize);
 
       return jsonResponse({
@@ -343,26 +371,45 @@ async function handle(request, env) {
         return jsonResponse({ error: `分片数超出本会话上限（最多 ${mp.m} 片）`, code: 'BAD_SESSION' }, 400);
       }
 
-      // ListParts 核验 OSS 端实际已上传的分片数与总字节数，
-      // 超出 init 声明值则自动 Abort 清理并拒绝合并（防「声明小传大」绕过限速/配额）
-      let marker = 0, actualCount = 0, actualBytes = 0;
+      // ListParts 逐片核验：分片号 + ETag + 每片字节数必须与 init 声明完全吻合。
+      // 只数总数不够——预签名 URL 在有效期内可重复 PUT 同号分片（OSS 允许覆盖），
+      // 攻击者可在「检查」与「合并」之间偷换成大分片并提交新 ETag 绕过大小限制；
+      // 逐片精确比对（含每片大小必须等于 partSize / 最后一片等于剩余字节）封死该路径。
+      if (typeof mp.z !== 'number' || mp.z <= 0) {
+        // 旧版会话令牌没有 partSize 字段：按会话失效处理，前端会自动重新 init
+        return rejectSession();
+      }
+      const expectedSizeOf = n => (n < mp.m ? mp.z : mp.s - (mp.m - 1) * mp.z);
+      const actual = new Map(); // partNumber -> { etag, size }
+      let marker = 0;
       for (let guard = 0; guard < 20; guard++) {
         // 子资源按字母序：part-number-marker < uploadId
         const sub = marker
           ? `?part-number-marker=${marker}&uploadId=${encodeURIComponent(uploadId)}`
           : `?uploadId=${encodeURIComponent(uploadId)}`;
         const lp = await ossRequest(env, 'GET', key, sub, '', null);
-        const sizes = [...lp.matchAll(/<Size>(\d+)<\/Size>/g)];
-        actualCount += sizes.length;
-        actualBytes += sizes.reduce((sum, x) => sum + parseInt(x[1], 10), 0);
+        const partRe = /<Part>[\s\S]*?<PartNumber>(\d+)<\/PartNumber>[\s\S]*?<ETag>"?([0-9a-fA-F]+)"?<\/ETag>[\s\S]*?<Size>(\d+)<\/Size>[\s\S]*?<\/Part>/g;
+        let pm;
+        while ((pm = partRe.exec(lp)) !== null) {
+          actual.set(parseInt(pm[1], 10), { etag: pm[2].toLowerCase(), size: parseInt(pm[3], 10) });
+        }
         const truncated = /<IsTruncated>true<\/IsTruncated>/.test(lp);
         const next = (lp.match(/<NextPartNumberMarker>(\d+)<\/NextPartNumberMarker>/) || [])[1];
         if (!truncated || !next) break;
         marker = parseInt(next, 10);
       }
-      if (actualCount > mp.m || actualBytes > mp.s) {
+      let violation = actual.size !== parts.length;
+      if (!violation) {
+        for (const p of parts) {
+          const n = parseInt(p.partNumber, 10);
+          const etag = String(p.etag || '').replace(/"/g, '').toLowerCase();
+          const a = actual.get(n);
+          if (!a || a.etag !== etag || a.size !== expectedSizeOf(n)) { violation = true; break; }
+        }
+      }
+      if (violation) {
         await ossRequest(env, 'DELETE', key, `?uploadId=${encodeURIComponent(uploadId)}`, '', null).catch(() => {});
-        return jsonResponse({ error: '实际上传内容超出声明大小，会话已清理' }, 400);
+        return jsonResponse({ error: '实际分片与 init 声明不一致（可能遭篡改），会话已清理', code: 'BAD_SESSION' }, 400);
       }
 
       let xmlBody = '<CompleteMultipartUpload>';
