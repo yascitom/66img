@@ -35,6 +35,27 @@ function xmlUnescape(s) {
     .replace(/&amp;/g, '&');
 }
 
+// 密码校验：SHA-256 哈希后比对；失败统一延迟 ~0.4s，拖慢在线暴力破解
+async function pwdOk(input, expected) {
+  if (!expected) return true;
+  const enc = new TextEncoder();
+  async function h(s) {
+    const d = await crypto.subtle.digest('SHA-256', enc.encode(String(s == null ? '' : s)));
+    return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+  return (await h(input)) === (await h(expected));
+}
+
+async function rejectAuth() {
+  await new Promise(r => setTimeout(r, 400));
+  return jsonResponse({ error: '上传密码错误' }, 401);
+}
+
+// 对象键逐段编码（保留 / 分隔符），用于拼接对外访问 URL
+function encodeKeyPath(key) {
+  return key.split('/').map(encodeURIComponent).join('/');
+}
+
 // 目录白名单：前端可选 全部 / 图片 / 视频 / 其他
 const DIR_PREFIX = {
   all: 'upweb/',
@@ -116,7 +137,7 @@ async function listObjects(env, token, dir) {
       time: m[2],
       size: parseInt(m[3], 10),
       type: typeOf(key),
-      url: env.PUBLIC_URL_BASE.replace(/\/$/, '') + '/' + key,
+      url: env.PUBLIC_URL_BASE.replace(/\/$/, '') + '/' + encodeKeyPath(key),
     });
   }
 
@@ -143,8 +164,8 @@ async function handle(request, env) {
     return jsonResponse({ error: '请求体必须是 JSON' }, 400);
   }
 
-  if (env.UPLOAD_PASSWORD && body.password !== env.UPLOAD_PASSWORD) {
-    return jsonResponse({ error: '上传密码错误' }, 401);
+  if (!(await pwdOk(body.password, env.UPLOAD_PASSWORD))) {
+    return rejectAuth();
   }
 
   try {
