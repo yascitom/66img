@@ -12,7 +12,7 @@
 //   总上传时长不受任何单一签名有效期限制；失败的分片可单独重签重传，
 //   已传成功的分片保存在 OSS 服务端，支持断点续传。
 // 安全：密钥不出服务端；每个 action 都校验 UPLOAD_PASSWORD；
-//       key 强制 upweb/ 前缀白名单，杜绝越权操作其他对象。
+//       key 强制 upweb/ 前缀白名单 + 安全字符集，杜绝越权操作其他对象。
 // 环境变量：与 sign.js 相同，新增（可选）：
 //   PART_SIZE_MB  分片大小，默认 10（MB），范围 5~100
 // ============================================================
@@ -67,9 +67,30 @@ function makeObjectKey(filename) {
   return `${dir}/${datePath}/${rand}.${ext}`;
 }
 
-// key 白名单校验：只允许 upweb/ 前缀，禁止 ..
+// ------------------------------------------------------------
+// 密码校验：SHA-256 哈希后再比对（避免长度/前缀泄露），
+// 失败统一延迟 ~0.4s 再返回 401，拖慢在线暴力破解。
+// ------------------------------------------------------------
+async function pwdOk(input, expected) {
+  if (!expected) return true; // 未设置 UPLOAD_PASSWORD 时放行（不建议）
+  const enc = new TextEncoder();
+  async function h(s) {
+    const d = await crypto.subtle.digest('SHA-256', enc.encode(String(s == null ? '' : s)));
+    return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+  return (await h(input)) === (await h(expected));
+}
+
+async function rejectAuth() {
+  await new Promise(r => setTimeout(r, 400));
+  return jsonResponse({ error: '上传密码错误' }, 401);
+}
+
+// key 白名单校验：只允许 upweb/ 前缀 + 安全字符集（字母数字 . _ - /），
+// 禁止 .. 和引号/尖括号等可注入字符，杜绝恶意 key 引发的存储型 XSS
+const KEY_RE = /^upweb\/[A-Za-z0-9._\/-]+$/;
 function validKey(key) {
-  return typeof key === 'string' && key.startsWith('upweb/') && !key.includes('..');
+  return typeof key === 'string' && key.length <= 512 && KEY_RE.test(key) && !key.includes('..');
 }
 
 // 对象键逐段编码（保留 / 分隔符），用于拼接 URL 路径
@@ -161,9 +182,9 @@ async function handle(request, env) {
     return jsonResponse({ error: '请求体必须是 JSON' }, 400);
   }
 
-  // 所有分片操作都校验上传密码
-  if (env.UPLOAD_PASSWORD && body.password !== env.UPLOAD_PASSWORD) {
-    return jsonResponse({ error: '上传密码错误' }, 401);
+  // 所有分片操作都校验上传密码（哈希比对 + 失败延迟）
+  if (!(await pwdOk(body.password, env.UPLOAD_PASSWORD))) {
+    return rejectAuth();
   }
 
   const maxMB = parseInt(env.MAX_SIZE_MB, 10) || 100;
@@ -237,7 +258,7 @@ async function handle(request, env) {
       return jsonResponse({
         ok: true,
         key,
-        url: `${env.PUBLIC_URL_BASE.replace(/\/$/, '')}/${key}`,
+        url: `${env.PUBLIC_URL_BASE.replace(/\/$/, '')}/${encodeKeyPath(key)}`,
         dir: key.split('/').slice(0, 2).join('/'),
       });
     }
