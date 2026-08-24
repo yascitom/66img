@@ -3,7 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>云汀云盘 · OSS Private Drive</title>
+<title>云窝 · OSS Private Drive</title>
+<meta name="description" content="云窝 —— 基于阿里云 OSS 私有桶 + Cloudflare 免流分发的私有图床与小型网盘">
 <style>
   :root{
     --bg:#0b0d12; --card:rgba(255,255,255,.04); --card-solid:#151822;
@@ -291,7 +292,7 @@
 <div id="lockScreen">
   <div class="lockbox" id="lockbox">
     <div class="lockicon">🔒</div>
-    <h2>云汀云盘</h2>
+    <h2>云窝</h2>
     <p>私有图床 · 小型网盘 · 请输入访问密码<br>密码由服务端 UPLOAD_PASSWORD 环境变量决定</p>
     <input type="password" id="lockInput" placeholder="访问密码" autocomplete="current-password">
     <button id="lockBtn">进 入</button>
@@ -319,8 +320,8 @@
 <div class="wrap" id="mainApp">
   <header>
     <div class="brand">
-      <div class="logo">☁️</div>
-      <h1>云汀云盘<small>OSS 私有存储 · Cloudflare 免流分发</small></h1>
+      <div class="logo">🪺</div>
+      <h1>云窝<small>OSS 私有存储 · Cloudflare 免流分发</small></h1>
     </div>
     <button class="headbtn" id="logoutBtn">退出登录</button>
   </header>
@@ -389,7 +390,16 @@
   const lockScreen=$('lockScreen'), lockbox=$('lockbox'), lockInput=$('lockInput'), lockBtn=$('lockBtn'), lockErr=$('lockErr');
   const mainApp=$('mainApp');
   const lightbox=$('lightbox'), lbMedia=$('lbMedia'), lbMeta=$('lbMeta');
-  const HIST_KEY='oss_imgbed_history', PWD_KEY='oss_imgbed_pwd', MP_KEY='yt_multipart_tasks';
+  const HIST_KEY='yunwo_history', PWD_KEY='yunwo_pwd', MP_KEY='yunwo_multipart_tasks';
+  // 旧版（云汀云盘）本地数据一次性迁移：老用户的登录态、历史记录、分片续传进度不丢
+  (function migrateLegacyKeys(){
+    const pairs=[['oss_imgbed_history',HIST_KEY],['oss_imgbed_pwd',PWD_KEY],['yt_multipart_tasks',MP_KEY]];
+    pairs.forEach(([oldK,newK])=>{
+      const v=localStorage.getItem(oldK);
+      if(v!==null && localStorage.getItem(newK)===null) localStorage.setItem(newK,v);
+      if(v!==null) localStorage.removeItem(oldK);
+    });
+  })();
   const DEMO_PASSWORD='demo1234';
   // 超过该大小走分片上传（Multipart）；小文件走 PostObject 一次直传
   // 与服务端 PART_SIZE_MB 默认 10MB 对齐；分片即签即传，慢网络不限总时长、支持断点续传
