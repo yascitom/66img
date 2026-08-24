@@ -52,15 +52,16 @@ async function hmacSha1Base64(secret, message) {
   return btoa(String.fromCharCode(...new Uint8Array(sig)));
 }
 
+// SHA-256 → hex（Web Crypto）
+async function sha256Hex(s) {
+  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(s == null ? '' : s)));
+  return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 // 密码校验：SHA-256 哈希后比对；失败统一延迟 ~0.4s，拖慢在线暴力破解
 async function pwdOk(input, expected) {
   if (!expected) return true;
-  const enc = new TextEncoder();
-  async function h(s) {
-    const d = await crypto.subtle.digest('SHA-256', enc.encode(String(s == null ? '' : s)));
-    return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
-  }
-  return (await h(input)) === (await h(expected));
+  return (await sha256Hex(input)) === (await sha256Hex(expected));
 }
 async function rejectAuth() {
   await new Promise(r => setTimeout(r, 400));
@@ -114,16 +115,42 @@ async function readToken(token, secret) {
   } catch { return null; }
 }
 
-const AUTH_TOKEN_TTL = 7 * 24 * 3600;
-async function makeAuthToken() {
-  return makeToken({ t: 'auth', e: Math.floor(Date.now() / 1000) + AUTH_TOKEN_TTL }, getEnv('OSS_ACCESS_KEY_SECRET'));
+// 令牌派生密钥：HMAC(SK, 版本标识 | Bucket | 密码哈希)
+// → 修改 UPLOAD_PASSWORD 立即作废全部已签发令牌；不同 Bucket 的部署实例令牌互不通用；
+//   无需新增环境变量。
+async function tokenKey() {
+  const fp = await sha256Hex(getEnv('UPLOAD_PASSWORD') || '');
+  return hmacSha256B64url(getEnv('OSS_ACCESS_KEY_SECRET'), 'yunwo-auth-v1|' + getEnv('OSS_BUCKET') + '|' + fp);
 }
 
-// 统一鉴权：密码 或 登录令牌（body.auth）任一通过即可（匿名模式下密码为空恒通过）
+// 登录会话令牌：7 天硬到期、不续期——到期必须重新输入密码
+const AUTH_TOKEN_TTL = 7 * 24 * 3600;
+async function makeAuthToken() {
+  return makeToken({ t: 'auth', e: Math.floor(Date.now() / 1000) + AUTH_TOKEN_TTL }, await tokenKey());
+}
+
+// 统一鉴权：返回 'pwd'（密码通过）/ 'token'（令牌通过）/ null（失败）
+// 匿名模式（显式 ALLOW_ANONYMOUS_UPLOAD=true）下密码为空恒通过，返回 'pwd'
 async function verifyAuth(body) {
-  if (await pwdOk(body.password, getEnv('UPLOAD_PASSWORD'))) return true;
-  const p = await readToken(body.auth, getEnv('OSS_ACCESS_KEY_SECRET'));
-  return !!(p && p.t === 'auth');
+  if (await pwdOk(body.password, getEnv('UPLOAD_PASSWORD'))) return 'pwd';
+  const p = await readToken(body.auth, await tokenKey());
+  return (p && p.t === 'auth') ? 'token' : null;
+}
+
+// 请求硬化：限制请求体与敏感字段长度，防畸形请求消耗函数资源
+// （真正的按 IP 限流需在平台 WAF 层配置，见 README「安全提示」）
+const MAX_BODY_BYTES = 8192;
+function badInput(body) {
+  if (!body || typeof body !== 'object') return '请求体必须是 JSON 对象';
+  const limits = { password: 128, auth: 2048, session: 2048, token: 2048, filename: 256, dir: 16, uploadId: 256, mime: 128 };
+  for (const k of Object.keys(limits)) {
+    if (typeof body[k] === 'string' && body[k].length > limits[k]) return '参数非法';
+  }
+  return '';
+}
+function bodyTooLarge(request, cap) {
+  const cl = parseInt(request.headers.get('Content-Length') || '0', 10);
+  return cl > (cap || MAX_BODY_BYTES);
 }
 
 const MP_TOKEN_TTL = 7 * 24 * 3600;
@@ -131,11 +158,12 @@ async function makeMpToken(key, uploadId, size, partSize) {
   return makeToken({
     t: 'mp', k: key, u: uploadId, s: size,
     m: Math.ceil(size / partSize),
+    z: partSize, // 分片大小（complete 逐片核验用）
     e: Math.floor(Date.now() / 1000) + MP_TOKEN_TTL,
-  }, getEnv('OSS_ACCESS_KEY_SECRET'));
+  }, await tokenKey());
 }
 async function mpSession(body, key, uploadId) {
-  const p = await readToken(body.session, getEnv('OSS_ACCESS_KEY_SECRET'));
+  const p = await readToken(body.session, await tokenKey());
   if (!p || p.t !== 'mp' || p.k !== key || p.u !== uploadId) return null;
   return p;
 }
@@ -228,8 +256,11 @@ async function handleList(request) {
   }
   const cfgErr = authConfigError();
   if (cfgErr) return jsonResponse({ error: cfgErr }, 500);
+  if (bodyTooLarge(request)) return jsonResponse({ error: '请求体过大' }, 413);
   let body;
   try { body = await request.json(); } catch { return jsonResponse({ error: '请求体必须是 JSON' }, 400); }
+  const inputErr = badInput(body);
+  if (inputErr) return jsonResponse({ error: inputErr }, 400);
   if (!(await verifyAuth(body))) {
     return rejectAuth();
   }
@@ -279,8 +310,11 @@ async function handleDelete(request) {
   }
   const cfgErr = authConfigError();
   if (cfgErr) return jsonResponse({ error: cfgErr }, 500);
+  if (bodyTooLarge(request)) return jsonResponse({ error: '请求体过大' }, 413);
   let body;
   try { body = await request.json(); } catch { return jsonResponse({ error: '请求体必须是 JSON' }, 400); }
+  const inputErr = badInput(body);
+  if (inputErr) return jsonResponse({ error: inputErr }, 400);
   if (!(await verifyAuth(body))) {
     return rejectAuth();
   }
@@ -303,20 +337,26 @@ async function handleSign(request) {
   }
   const cfgErr = authConfigError();
   if (cfgErr) return jsonResponse({ error: cfgErr }, 500);
+  if (bodyTooLarge(request)) return jsonResponse({ error: '请求体过大' }, 413);
 
   let body;
   try { body = await request.json(); } catch { return jsonResponse({ error: '请求体必须是 JSON' }, 400); }
+  const inputErr = badInput(body);
+  if (inputErr) return jsonResponse({ error: inputErr }, 400);
 
   const pwd = getEnv('UPLOAD_PASSWORD');
   const maxMB = parseInt(getEnv('MAX_SIZE_MB'), 10) || 100;
   const maxSize = maxMB * 1024 * 1024;
 
-  // 密码预检：前端登录门禁专用；通过后签发 7 天登录令牌，前端不再保存明文密码
+  // 密码预检：前端登录门禁专用；仅密码通过才签发 7 天令牌，持令牌预检不续签
   if (body.check === true) {
-    if (!(await verifyAuth(body))) {
+    const authBy = await verifyAuth(body);
+    if (!authBy) {
       return rejectAuth();
     }
-    return jsonResponse({ ok: true, needPassword: !!pwd, maxMB, token: await makeAuthToken() });
+    const resp = { ok: true, needPassword: !!pwd, maxMB };
+    if (authBy === 'pwd' && pwd) resp.token = await makeAuthToken();
+    return jsonResponse(resp);
   }
 
   if (!(await verifyAuth(body))) {
@@ -331,7 +371,12 @@ async function handleSign(request) {
   const objectKey = makeObjectKey(body.filename || 'file.bin');
   const policy = btoa(JSON.stringify({
     expiration: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
-    conditions: [['content-length-range', 1, maxSize], ['eq', '$key', objectKey]],
+    conditions: [
+      { bucket: getEnv('OSS_BUCKET') },
+      ['content-length-range', 1, maxSize],
+      ['eq', '$key', objectKey],
+      ['eq', '$x-oss-forbid-overwrite', 'true'],
+    ],
   }));
   const signature = await hmacSha1Base64(getEnv('OSS_ACCESS_KEY_SECRET'), policy);
 
@@ -412,7 +457,7 @@ async function signPartUrl(key, uploadId, partNumber, mime) {
   const signature = await hmacSha1Base64(getEnv('OSS_ACCESS_KEY_SECRET'), stringToSign);
   return `https://${bucket}.${getEnv('OSS_ENDPOINT')}/${encodeKeyPath(key)}`
     + `?partNumber=${partNumber}&uploadId=${encodeURIComponent(uploadId)}`
-    + `&OSSAccessKeyId=${encodeURIComponent(getEnv('OSS_ACCESS_KEY_ID'))}`
+    + `&OSSAccessKeyId=${encodeURIComponent(getEnv('OSS_ACCESS_KEY_ID))}`
     + `&Expires=${expires}&Signature=${encodeURIComponent(signature)}`;
 }
 
@@ -423,8 +468,11 @@ async function handleMultipart(request) {
   }
   const cfgErr = authConfigError();
   if (cfgErr) return jsonResponse({ error: cfgErr }, 500);
+  if (bodyTooLarge(request, 256 * 1024)) return jsonResponse({ error: '请求体过大' }, 413);
   let body;
   try { body = await request.json(); } catch { return jsonResponse({ error: '请求体必须是 JSON' }, 400); }
+  const inputErr = badInput(body);
+  if (inputErr) return jsonResponse({ error: inputErr }, 400);
   if (!(await verifyAuth(body))) {
     return rejectAuth();
   }
@@ -481,24 +529,43 @@ async function handleMultipart(request) {
       if (parts.length > mp.m) {
         return jsonResponse({ error: `分片数超出本会话上限（最多 ${mp.m} 片）`, code: 'BAD_SESSION' }, 400);
       }
-      // ListParts 核验 OSS 端实际分片数与总字节数，超声明值自动 Abort 清理
-      let marker = 0, actualCount = 0, actualBytes = 0;
+      // ListParts 逐片核验：分片号 + ETag + 每片字节数必须与 init 声明完全吻合。
+      // 预签名 URL 有效期内可重复 PUT 同号分片覆盖，逐片精确比对封死
+      // 「检查后偷换大分片」的 TOCTOU 绕过路径。
+      if (typeof mp.z !== 'number' || mp.z <= 0) {
+        // 旧版会话令牌没有 partSize 字段：按会话失效处理，前端会自动重新 init
+        return rejectSession();
+      }
+      const expectedSizeOf = n => (n < mp.m ? mp.z : mp.s - (mp.m - 1) * mp.z);
+      const actual = new Map(); // partNumber -> { etag, size }
+      let marker = 0;
       for (let guard = 0; guard < 20; guard++) {
         const sub = marker
           ? `?part-number-marker=${marker}&uploadId=${encodeURIComponent(uploadId)}`
           : `?uploadId=${encodeURIComponent(uploadId)}`;
         const lp = await ossRequest('GET', key, sub, '', null);
-        const sizes = [...lp.matchAll(/<Size>(\d+)<\/Size>/g)];
-        actualCount += sizes.length;
-        actualBytes += sizes.reduce((sum, x) => sum + parseInt(x[1], 10), 0);
+        const partRe = /<Part>[\s\S]*?<PartNumber>(\d+)<\/PartNumber>[\s\S]*?<ETag>"?([0-9a-fA-F]+)"?<\/ETag>[\s\S]*?<Size>(\d+)<\/Size>[\s\S]*?<\/Part>/g;
+        let pm;
+        while ((pm = partRe.exec(lp)) !== null) {
+          actual.set(parseInt(pm[1], 10), { etag: pm[2].toLowerCase(), size: parseInt(pm[3], 10) });
+        }
         const truncated = /<IsTruncated>true<\/IsTruncated>/.test(lp);
         const next = (lp.match(/<NextPartNumberMarker>(\d+)<\/NextPartNumberMarker>/) || [])[1];
         if (!truncated || !next) break;
         marker = parseInt(next, 10);
       }
-      if (actualCount > mp.m || actualBytes > mp.s) {
+      let violation = actual.size !== parts.length;
+      if (!violation) {
+        for (const p of parts) {
+          const n = parseInt(p.partNumber, 10);
+          const etag = String(p.etag || '').replace(/"/g, '').toLowerCase();
+          const a = actual.get(n);
+          if (!a || a.etag !== etag || a.size !== expectedSizeOf(n)) { violation = true; break; }
+        }
+      }
+      if (violation) {
         await ossRequest('DELETE', key, `?uploadId=${encodeURIComponent(uploadId)}`, '', null).catch(() => {});
-        return jsonResponse({ error: '实际上传内容超出声明大小，会话已清理' }, 400);
+        return jsonResponse({ error: '实际分片与 init 声明不一致（可能遭篡改），会话已清理', code: 'BAD_SESSION' }, 400);
       }
       let xmlBody = '<CompleteMultipartUpload>';
       for (const p of parts) {
