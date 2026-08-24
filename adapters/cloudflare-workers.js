@@ -41,17 +41,18 @@ function makeObjectKey(filename) {
   return `img/${datePath}/${rand}.${ext}`;
 }
 
-// OSS ListObjectsV2（GET Bucket），V1 签名
+// OSS ListObjectsV2（GET Bucket），V1 签名。
+// 用 x-oss-date 替代 Date 头（边缘运行时受限头会被改写，否则 SignatureDoesNotMatch）
 async function listObjects(env, token) {
   const bucket = env.OSS_BUCKET;
   const endpoint = env.OSS_ENDPOINT;
   const params = new URLSearchParams({ 'list-type': '2', prefix: 'img/', 'max-keys': '60' });
   if (token) params.set('continuation-token', token);
   const date = new Date().toUTCString();
-  const stringToSign = 'GET\n\n\n' + date + '\n/' + bucket + '/?list-type=2';
+  const stringToSign = 'GET\n\n\n\nx-oss-date:' + date + '\n/' + bucket + '/?list-type=2';
   const signature = await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, stringToSign);
   const r = await fetch(`https://${bucket}.${endpoint}/?${params.toString()}`, {
-    headers: { Date: date, Authorization: `OSS ${env.OSS_ACCESS_KEY_ID}:${signature}` },
+    headers: { 'x-oss-date': date, Authorization: `OSS ${env.OSS_ACCESS_KEY_ID}:${signature}` },
   });
   const xml = await r.text();
   if (!r.ok) {
@@ -86,16 +87,17 @@ async function handleList(request, env) {
   }
 }
 
-// OSS DeleteObject：StringToSign = DELETE\n\n\n<Date>\n/<bucket>/<key>
+// OSS DeleteObject：用 x-oss-date 替代 Date 头
+// StringToSign = DELETE\n\n\n\nx-oss-date:<date>\n/<bucket>/<key>
 async function deleteObject(env, key) {
   const bucket = env.OSS_BUCKET;
   const endpoint = env.OSS_ENDPOINT;
   const date = new Date().toUTCString();
-  const stringToSign = 'DELETE\n\n\n' + date + '\n/' + bucket + '/' + key;
+  const stringToSign = 'DELETE\n\n\n\nx-oss-date:' + date + '\n/' + bucket + '/' + key;
   const signature = await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, stringToSign);
   const r = await fetch(`https://${bucket}.${endpoint}/${key.split('/').map(encodeURIComponent).join('/')}`, {
     method: 'DELETE',
-    headers: { Date: date, Authorization: `OSS ${env.OSS_ACCESS_KEY_ID}:${signature}` },
+    headers: { 'x-oss-date': date, Authorization: `OSS ${env.OSS_ACCESS_KEY_ID}:${signature}` },
   });
   if (!r.ok && r.status !== 204) {
     const xml = await r.text();
