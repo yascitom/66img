@@ -34,6 +34,21 @@ async function hmacSha1Base64(secret, message) {
   return btoa(String.fromCharCode(...new Uint8Array(sig)));
 }
 
+// 密码校验：SHA-256 哈希后比对；失败统一延迟 ~0.4s，拖慢在线暴力破解
+async function pwdOk(input, expected) {
+  if (!expected) return true;
+  const enc = new TextEncoder();
+  async function h(s) {
+    const d = await crypto.subtle.digest('SHA-256', enc.encode(String(s == null ? '' : s)));
+    return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+  return (await h(input)) === (await h(expected));
+}
+async function rejectAuth() {
+  await new Promise(r => setTimeout(r, 400));
+  return jsonResponse({ error: '上传密码错误' }, 401);
+}
+
 const IMG_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'avif', 'bmp', 'ico', 'tiff'];
 const VIDEO_EXTS = ['mp4', 'webm', 'mov', 'mkv', 'm4v', 'avi', 'flv', 'ts'];
 
@@ -105,7 +120,7 @@ async function listObjects(env, token, dir) {
   let m;
   while ((m = re.exec(xml)) !== null) {
     const key = xmlUnescape(m[1]);
-    files.push({ key: key, time: m[2], size: parseInt(m[3], 10), type: typeOf(key), url: env.PUBLIC_URL_BASE.replace(/\/$/, '') + '/' + key });
+    files.push({ key: key, time: m[2], size: parseInt(m[3], 10), type: typeOf(key), url: env.PUBLIC_URL_BASE.replace(/\/$/, '') + '/' + encodeKeyPath(key) });
   }
   const nextToken = (xml.match(/<NextContinuationToken>([^<]*)<\/NextContinuationToken>/) || [])[1] || '';
   const truncated = /<IsTruncated>true<\/IsTruncated>/.test(xml);
@@ -119,8 +134,8 @@ async function handleList(request, env) {
   }
   let body;
   try { body = await request.json(); } catch { return jsonResponse({ error: '请求体必须是 JSON' }, 400); }
-  if (env.UPLOAD_PASSWORD && body.password !== env.UPLOAD_PASSWORD) {
-    return jsonResponse({ error: '上传密码错误' }, 401);
+  if (!(await pwdOk(body.password, env.UPLOAD_PASSWORD))) {
+    return rejectAuth();
   }
   try {
     return jsonResponse(await listObjects(env, body.token || '', String(body.dir || 'all')));
@@ -168,11 +183,11 @@ async function handleDelete(request, env) {
   }
   let body;
   try { body = await request.json(); } catch { return jsonResponse({ error: '请求体必须是 JSON' }, 400); }
-  if (env.UPLOAD_PASSWORD && body.password !== env.UPLOAD_PASSWORD) {
-    return jsonResponse({ error: '上传密码错误' }, 401);
+  if (!(await pwdOk(body.password, env.UPLOAD_PASSWORD))) {
+    return rejectAuth();
   }
   const key = String(body.key || '');
-  if (!key.startsWith('upweb/') || key.includes('..')) {
+  if (!validMpKey(key)) {
     return jsonResponse({ error: '仅允许删除 upweb/ 前缀下的文件' }, 400);
   }
   try {
@@ -194,8 +209,10 @@ function xmlEscape(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
+// key 白名单：upweb/ 前缀 + 安全字符集（字母数字 . _ - /），禁 .. 与引号/尖括号等可注入字符
+const KEY_RE = /^upweb\/[A-Za-z0-9._\/-]+$/;
 function validMpKey(key) {
-  return typeof key === 'string' && key.startsWith('upweb/') && !key.includes('..');
+  return typeof key === 'string' && key.length <= 512 && KEY_RE.test(key) && !key.includes('..');
 }
 function encodeKeyPath(key) {
   return key.split('/').map(encodeURIComponent).join('/');
@@ -255,8 +272,8 @@ async function handleMultipart(request, env) {
   }
   let body;
   try { body = await request.json(); } catch { return jsonResponse({ error: '请求体必须是 JSON' }, 400); }
-  if (env.UPLOAD_PASSWORD && body.password !== env.UPLOAD_PASSWORD) {
-    return jsonResponse({ error: '上传密码错误' }, 401);
+  if (!(await pwdOk(body.password, env.UPLOAD_PASSWORD))) {
+    return rejectAuth();
   }
 
   const maxMB = parseInt(env.MAX_SIZE_MB, 10) || 100;
@@ -311,7 +328,7 @@ async function handleMultipart(request, env) {
       }
       xmlBody += '</CompleteMultipartUpload>';
       await ossRequest(env, 'POST', key, `?uploadId=${encodeURIComponent(uploadId)}`, 'application/xml', xmlBody);
-      return jsonResponse({ ok: true, key, url: `${env.PUBLIC_URL_BASE.replace(/\/$/, '')}/${key}`, dir: key.split('/').slice(0, 2).join('/') });
+      return jsonResponse({ ok: true, key, url: `${env.PUBLIC_URL_BASE.replace(/\/$/, '')}/${encodeKeyPath(key)}`, dir: key.split('/').slice(0, 2).join('/') });
     }
 
     if (action === 'abort') {
@@ -342,14 +359,14 @@ async function handleSign(request, env) {
 
   // 密码预检：前端登录门禁专用，只验密码、不生成签名（顺带返回大小上限）
   if (body.check === true) {
-    if (env.UPLOAD_PASSWORD && body.password !== env.UPLOAD_PASSWORD) {
-      return jsonResponse({ error: '上传密码错误' }, 401);
+    if (!(await pwdOk(body.password, env.UPLOAD_PASSWORD))) {
+      return rejectAuth();
     }
     return jsonResponse({ ok: true, needPassword: !!env.UPLOAD_PASSWORD, maxMB });
   }
 
-  if (env.UPLOAD_PASSWORD && body.password !== env.UPLOAD_PASSWORD) {
-    return jsonResponse({ error: '上传密码错误' }, 401);
+  if (!(await pwdOk(body.password, env.UPLOAD_PASSWORD))) {
+    return rejectAuth();
   }
 
   const size = parseInt(body.size, 10) || 0;
