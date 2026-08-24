@@ -648,8 +648,58 @@
     return data;
   }
 
+  // 精简 MD5（ArrayBuffer → hex，基于 Paul Johnston 公共域实现改写）
+  // 用途：本地计算分片内容 MD5 作为 ETag 兜底 —— OSS UploadPart 的 ETag 即分片内容 MD5，
+  // 这样即使桶 CORS 没配 ExposeHeader: ETag（或被其他通配规则抢先匹配），上传也不受影响。
+  function md5Hex(buffer){
+    const bytes=new Uint8Array(buffer);
+    const n=bytes.length;
+    const bitLen=n*8;
+    const padLen=((n%64)<56?56:120)-(n%64);
+    const total=n+padLen+8;
+    const buf=new Uint8Array(total);
+    buf.set(bytes); buf[n]=0x80;
+    const dv=new DataView(buf.buffer);
+    dv.setUint32(total-8, bitLen>>>0, true);
+    dv.setUint32(total-4, Math.floor(bitLen/4294967296), true);
+    const S=[7,12,17,22,7,12,17,22,7,12,17,22,7,12,17,22,
+             5,9,14,20,5,9,14,20,5,9,14,20,5,9,14,20,
+             4,11,16,23,4,11,16,23,4,11,16,23,4,11,16,23,
+             6,10,15,21,6,10,15,21,6,10,15,21,6,10,15,21];
+    const K=new Uint32Array(64);
+    for(let i=0;i<64;i++) K[i]=Math.floor(Math.abs(Math.sin(i+1))*4294967296);
+    let a0=0x67452301, b0=0xefcdab89, c0=0x98badcfe, d0=0x10325476;
+    const M=new Uint32Array(16);
+    for(let off=0; off<total; off+=64){
+      for(let i=0;i<16;i++) M[i]=dv.getUint32(off+i*4, true);
+      let A=a0, B=b0, C=c0, D=d0;
+      for(let i=0;i<64;i++){
+        let F, g;
+        if(i<16){ F=(B&C)|(~B&D); g=i; }
+        else if(i<32){ F=(D&B)|(~D&C); g=(5*i+1)%16; }
+        else if(i<48){ F=B^C^D; g=(3*i+5)%16; }
+        else { F=C^(B|~D); g=(7*i)%16; }
+        const tmp=D;
+        const sum=(A+F+K[i]+M[g]);
+        D=C; C=B;
+        const s=S[i];
+        B=(B+(((sum<<s)|(sum>>>(32-s)))))|0;
+        A=tmp;
+      }
+      a0=(a0+A)|0; b0=(b0+B)|0; c0=(c0+C)|0; d0=(d0+D)|0;
+    }
+    const out=new Uint8Array(16);
+    const ov=new DataView(out.buffer);
+    ov.setUint32(0, a0, true); ov.setUint32(4, b0, true);
+    ov.setUint32(8, c0, true); ov.setUint32(12, d0, true);
+    let hex='';
+    for(let i=0;i<16;i++) hex+=out[i].toString(16).padStart(2,'0');
+    return hex;
+  }
+
   // XHR PUT 单个分片（fetch 拿不到上传进度，XHR 可以）
-  function xhrPut(url, blob, mime, onProgress){
+  // md5Fallback：本地算好的分片 MD5，读不到 ETag 响应头时兜底
+  function xhrPut(url, blob, mime, md5Fallback, onProgress){
     return new Promise((resolve,reject)=>{
       const x=new XMLHttpRequest();
       x.open('PUT', url);
@@ -658,8 +708,8 @@
       x.onload=()=>{
         if(x.status>=200 && x.status<300){
           const etag=x.getResponseHeader('ETag');
-          if(!etag) reject(new Error('OSS 未返回 ETag（请在桶 CORS 配置的 ExposeHeader 中加入 ETag）'));
-          else resolve(etag.replace(/"/g,''));
+          // 优先用服务端返回的 ETag；CORS 未暴露时用本地 MD5（二者本来相等）
+          resolve((etag || md5Fallback || '').replace(/"/g,''));
         }else{
           const m=(x.responseText||'').match(/<Code>([^<]+)<\/Code>/);
           const err=new Error('分片上传失败：'+(m?m[1]:('HTTP '+x.status)));
@@ -667,18 +717,21 @@
           reject(err);
         }
       };
-      x.onerror=()=>reject(new Error('网络中断'));
+      x.onerror=()=>reject(new Error('网络中断（若反复出现，请检查桶 CORS 的来源是否包含本站域名、方法是否允许 PUT）'));
       x.send(blob);
     });
   }
 
   // 单个分片：最多 3 次尝试，每次都重新签名（慢网络下签名过期也能自愈）
   async function uploadPartWithRetry(task, n, chunk, onProgress){
+    const md5=md5Hex(await chunk.arrayBuffer()); // 只算一次，重试复用
     let lastErr=null;
     for(let attempt=1; attempt<=3; attempt++){
       try{
         const sign=await mpApi({action:'part', key:task.key, uploadId:task.uploadId, partNumber:n, mime:task.mime});
-        return await xhrPut(sign.url, chunk, task.mime, onProgress);
+        const etag=await xhrPut(sign.url, chunk, task.mime, md5, onProgress);
+        if(!etag) throw new Error('ETag 为空');
+        return etag;
       }catch(e){
         lastErr=e;
         if(e.code==='NoSuchUpload') throw e; // 会话已失效：不重试，交给外层整体重启
