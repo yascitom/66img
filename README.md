@@ -164,3 +164,5 @@
 - **阿里云 ESA**：控制台 → 安全防护 → WAF → 自定义规则/频次控制 → 路径 `/api/*`，按 IP 限速
 
 同时建议把密码设为**真正随机的长密码**（16 位以上），"至少 10 位"只是底线。
+![image](https://img.pub/p/7e639bcb7823d510e80f.jpg)
+![image](https://img.pub/p/9e1fcc4c9bf0e56e311c.jpg)
