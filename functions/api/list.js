@@ -25,8 +25,11 @@ async function hmacSha1Base64(secret, message) {
   return btoa(String.fromCharCode(...new Uint8Array(sig)));
 }
 
-// OSS ListObjectsV2（GET Bucket），V1 签名：
-// StringToSign = GET\n\n\n<Date>\n/<bucket>/?list-type=2
+// OSS ListObjectsV2（GET Bucket），V1 签名。
+// 注意：边缘运行时（EO/CF/ESA）会拦截改写 Date 请求头，导致 SignatureDoesNotMatch，
+// 因此使用 OSS 官方支持的 x-oss-date 替代：StringToSign 中 Date 留空，
+// x-oss-date 进 CanonicalizedOSSHeaders：
+// StringToSign = GET\n\n\n\nx-oss-date:<date>\n/<bucket>/?list-type=2
 async function listObjects(env, token) {
   const bucket = env.OSS_BUCKET;
   const endpoint = env.OSS_ENDPOINT;
@@ -39,12 +42,12 @@ async function listObjects(env, token) {
   if (token) params.set('continuation-token', token);
 
   const date = new Date().toUTCString();
-  const stringToSign = 'GET\n\n\n' + date + '\n/' + bucket + '/?list-type=2';
+  const stringToSign = 'GET\n\n\n\nx-oss-date:' + date + '\n/' + bucket + '/?list-type=2';
   const signature = await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, stringToSign);
 
   const r = await fetch(`https://${bucket}.${endpoint}/?${params.toString()}`, {
     headers: {
-      Date: date,
+      'x-oss-date': date,
       Authorization: `OSS ${env.OSS_ACCESS_KEY_ID}:${signature}`,
     },
   });

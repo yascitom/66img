@@ -23,18 +23,19 @@ async function hmacSha1Base64(secret, message) {
   return btoa(String.fromCharCode(...new Uint8Array(sig)));
 }
 
-// OSS DeleteObject：StringToSign = DELETE\n\n\n<Date>\n/<bucket>/<key>
+// OSS DeleteObject。同 list.js：用 x-oss-date 替代 Date 头（边缘运行时会改写 Date），
+// StringToSign = DELETE\n\n\n\nx-oss-date:<date>\n/<bucket>/<key>
 async function deleteObject(env, key) {
   const bucket = env.OSS_BUCKET;
   const endpoint = env.OSS_ENDPOINT;
   const date = new Date().toUTCString();
-  const stringToSign = 'DELETE\n\n\n' + date + '\n/' + bucket + '/' + key;
+  const stringToSign = 'DELETE\n\n\n\nx-oss-date:' + date + '\n/' + bucket + '/' + key;
   const signature = await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, stringToSign);
 
   const r = await fetch(`https://${bucket}.${endpoint}/${key.split('/').map(encodeURIComponent).join('/')}`, {
     method: 'DELETE',
     headers: {
-      Date: date,
+      'x-oss-date': date,
       Authorization: `OSS ${env.OSS_ACCESS_KEY_ID}:${signature}`,
     },
   });
