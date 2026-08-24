@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>云汀图床 · OSS Image Bed</title>
+<title>云汀云盘 · OSS Private Drive</title>
 <style>
   :root{
     --bg:#0b0d12; --card:rgba(255,255,255,.04); --card-solid:#151822;
@@ -67,6 +67,15 @@
   .mini-btn.danger:hover{color:var(--err);border-color:rgba(240,100,90,.4)}
   .count-tag{font-size:11.5px;color:var(--faint);font-weight:400}
 
+  /* ===== 目录标签页 ===== */
+  .tabs{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
+  .tab{
+    background:rgba(255,255,255,.05);border:1px solid var(--border);color:var(--muted);
+    border-radius:99px;font-size:12.5px;padding:7px 16px;cursor:pointer;transition:.2s;letter-spacing:.3px;
+  }
+  .tab:hover{color:var(--text);border-color:var(--border-hover)}
+  .tab.active{background:var(--grad);color:#fff;border-color:transparent;box-shadow:0 4px 14px rgba(110,155,255,.3)}
+
   /* ===== 上传区 ===== */
   #dropzone{
     border:1.5px dashed var(--border-hover);border-radius:14px;
@@ -102,6 +111,10 @@
     animation:rise .3s backwards;
   }
   .qitem img{width:46px;height:46px;border-radius:9px;object-fit:cover;flex:none;border:1px solid var(--border)}
+  .qitem .qico{
+    width:46px;height:46px;border-radius:9px;flex:none;border:1px solid var(--border);
+    background:rgba(255,255,255,.04);display:flex;align-items:center;justify-content:center;font-size:21px;
+  }
   .qitem .info{flex:1;min-width:0}
   .qitem .name{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .qitem .st{font-size:11.5px;color:var(--muted);margin-top:3px}
@@ -145,7 +158,7 @@
   }
   .searchbox input::placeholder{color:var(--faint)}
 
-  /* ===== 图库网格 ===== */
+  /* ===== 文件网格 ===== */
   .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:12px}
   .gitem{
     position:relative;border-radius:12px;overflow:hidden;border:1px solid var(--border);
@@ -153,14 +166,30 @@
     transition:.2s;animation:rise .35s backwards;
   }
   .gitem:hover{border-color:var(--border-hover);transform:translateY(-2px);box-shadow:0 8px 24px rgba(0,0,0,.4)}
-  .gitem img{width:100%;height:100%;object-fit:cover;transition:.3s}
-  .gitem:hover img{transform:scale(1.05)}
+  .gitem img,.gitem video{width:100%;height:100%;object-fit:cover;transition:.3s;display:block}
+  .gitem:hover img,.gitem:hover video{transform:scale(1.05)}
   .gitem .mask{
     position:absolute;inset:0;background:linear-gradient(to top,rgba(0,0,0,.72),transparent 55%);
-    opacity:0;transition:.2s;display:flex;align-items:flex-end;padding:8px;
+    opacity:0;transition:.2s;display:flex;align-items:flex-end;padding:8px;pointer-events:none;
   }
   .gitem:hover .mask{opacity:1}
   .gitem .mask span{font-size:10.5px;color:#d8dce8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .gitem .badge{
+    position:absolute;top:7px;left:7px;background:rgba(10,12,18,.72);backdrop-filter:blur(4px);
+    border-radius:7px;font-size:10px;padding:3px 8px;color:#cfd6e6;letter-spacing:.3px;pointer-events:none;
+    display:flex;align-items:center;gap:4px;
+  }
+  /* 非图片文件瓦片 */
+  .ftile{
+    width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:9px;padding:10px;transition:.2s;
+  }
+  .ftile .fico{font-size:36px;filter:drop-shadow(0 4px 10px rgba(0,0,0,.4))}
+  .ftile .fext{
+    font-size:10px;color:var(--muted);letter-spacing:1.5px;text-transform:uppercase;
+    background:rgba(255,255,255,.05);border:1px solid var(--border);border-radius:6px;padding:2px 9px;
+  }
+  .gitem:hover .ftile{background:rgba(110,155,255,.05)}
   .empty{color:var(--faint);font-size:13px;text-align:center;padding:26px 0;line-height:1.9}
 
   /* ===== 骨架屏 ===== */
@@ -176,6 +205,14 @@
   @keyframes fadein{from{opacity:0}}
   .lb-box{max-width:min(860px,94vw);text-align:center}
   .lb-box img{max-width:100%;max-height:68vh;border-radius:14px;box-shadow:0 20px 60px rgba(0,0,0,.6);border:1px solid var(--border)}
+  .lb-box video{max-width:100%;max-height:68vh;border-radius:14px;box-shadow:0 20px 60px rgba(0,0,0,.6);border:1px solid var(--border);background:#000}
+  .lb-file{
+    background:var(--card-solid);border:1px solid var(--border);border-radius:16px;
+    padding:42px 52px;box-shadow:0 20px 60px rgba(0,0,0,.6);
+    display:inline-flex;flex-direction:column;align-items:center;gap:12px;
+  }
+  .lb-file .fico{font-size:58px}
+  .lb-file .fname{font-size:14px;word-break:break-all;max-width:60vw}
   .lb-meta{font-size:12.5px;color:var(--muted);margin:14px 0;word-break:break-all;line-height:1.8}
   .lb-ops{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
   .lb-ops button{
@@ -254,8 +291,8 @@
 <div id="lockScreen">
   <div class="lockbox" id="lockbox">
     <div class="lockicon">🔒</div>
-    <h2>云汀图床</h2>
-    <p>私有图床 · 请输入访问密码<br>密码由服务端 UPLOAD_PASSWORD 环境变量决定</p>
+    <h2>云汀云盘</h2>
+    <p>私有图床 · 小型网盘 · 请输入访问密码<br>密码由服务端 UPLOAD_PASSWORD 环境变量决定</p>
     <input type="password" id="lockInput" placeholder="访问密码" autocomplete="current-password">
     <button id="lockBtn">进 入</button>
     <div class="lockerr" id="lockErr"></div>
@@ -267,11 +304,12 @@
 <!-- 灯箱 -->
 <div id="lightbox">
   <div class="lb-box">
-    <img id="lbImg" alt="">
+    <div id="lbMedia"></div>
     <div class="lb-meta" id="lbMeta"></div>
     <div class="lb-ops">
       <button id="lbCopy">复制链接</button>
       <button id="lbCopyMd">复制 Markdown</button>
+      <button id="lbOpen" style="display:none">打开 / 下载</button>
       <button id="lbDelete" class="danger">删除</button>
       <button id="lbClose">关闭</button>
     </div>
@@ -282,37 +320,43 @@
   <header>
     <div class="brand">
       <div class="logo">☁️</div>
-      <h1>云汀图床<small>OSS 私有存储 · Cloudflare 免流分发</small></h1>
+      <h1>云汀云盘<small>OSS 私有存储 · Cloudflare 免流分发</small></h1>
     </div>
     <button class="headbtn" id="logoutBtn">退出登录</button>
   </header>
 
   <!-- 上传 -->
   <div class="card">
-    <div class="sec-title"><span>上传图片</span></div>
+    <div class="sec-title"><span>上传文件</span></div>
     <div id="dropzone">
-      <div class="icon">🖼️</div>
-      <p>点击选择 · 拖拽图片到这里 · 或 <kbd>Ctrl</kbd> + <kbd>V</kbd> 粘贴</p>
-      <p class="hint">支持多选批量上传 ｜ JPG / PNG / GIF / WebP / SVG ｜ 单张最大 10MB</p>
+      <div class="icon">🗂️</div>
+      <p>点击选择 · 拖拽文件到这里 · 或 <kbd>Ctrl</kbd> + <kbd>V</kbd> 粘贴图片</p>
+      <p class="hint">图片 / 视频 / 压缩包 / 文档 任意文件，自动归类目录 ｜ 单文件最大 <span id="maxMBVal">100</span>MB</p>
     </div>
-    <input type="file" id="fileInput" accept="image/*" multiple style="display:none">
+    <input type="file" id="fileInput" multiple style="display:none">
 
     <div class="settings">
-      <label class="switch"><input type="checkbox" id="webpToggle" checked> 智能压缩为 WebP</label>
+      <label class="switch"><input type="checkbox" id="webpToggle" checked> 图片智能压缩为 WebP</label>
       <label>画质 <input type="range" id="quality" min="10" max="100" value="82"> <span id="qualityVal">82</span>%</label>
     </div>
 
     <div id="queue"></div>
   </div>
 
-  <!-- 云端图库 -->
+  <!-- 云端文件 -->
   <div class="card">
     <div class="sec-title">
-      <span>云端图库 <span class="count-tag" id="cloudCount"></span></span>
+      <span>云端文件 <span class="count-tag" id="cloudCount"></span></span>
       <div class="ops">
         <div class="searchbox">🔍 <input type="text" id="cloudSearch" placeholder="筛选文件名…"></div>
         <button class="mini-btn" id="cloudRefresh">刷新</button>
       </div>
+    </div>
+    <div class="tabs" id="dirTabs">
+      <button class="tab active" data-dir="all">全部</button>
+      <button class="tab" data-dir="img">🖼️ 图片</button>
+      <button class="tab" data-dir="video">🎬 视频</button>
+      <button class="tab" data-dir="other">📦 其他</button>
     </div>
     <div class="grid" id="cloudList"></div>
     <div style="text-align:center;margin-top:16px">
@@ -331,7 +375,8 @@
   </div>
 
   <footer>
-    存储：阿里云 OSS（私有桶） · 分发：Cloudflare 带宽联盟免流 · 历史记录仅保存在浏览器本地
+    存储：阿里云 OSS（私有桶） · 分发：Cloudflare 带宽联盟免流 · 历史记录仅保存在浏览器本地<br>
+    目录：upweb/img 图片 · upweb/video 视频 · upweb/other 其他
   </footer>
 </div>
 
@@ -343,9 +388,32 @@
   const webpToggle=$('webpToggle'), quality=$('quality'), qualityVal=$('qualityVal');
   const lockScreen=$('lockScreen'), lockbox=$('lockbox'), lockInput=$('lockInput'), lockBtn=$('lockBtn'), lockErr=$('lockErr');
   const mainApp=$('mainApp');
-  const lightbox=$('lightbox'), lbImg=$('lbImg'), lbMeta=$('lbMeta');
+  const lightbox=$('lightbox'), lbMedia=$('lbMedia'), lbMeta=$('lbMeta');
   const HIST_KEY='oss_imgbed_history', PWD_KEY='oss_imgbed_pwd';
   const DEMO_PASSWORD='demo1234';
+
+  // 文件类型识别（与后端保持一致）
+  const IMG_EXTS=['jpg','jpeg','png','gif','webp','svg','avif','bmp','ico','tiff'];
+  const VIDEO_EXTS=['mp4','webm','mov','mkv','m4v','avi','flv','ts'];
+  function fileTypeOf(name){
+    const ext=(name.split('.').pop()||'').toLowerCase();
+    if(IMG_EXTS.includes(ext)) return 'image';
+    if(VIDEO_EXTS.includes(ext)) return 'video';
+    return 'other';
+  }
+  function fileIcon(name){
+    const ext=(name.split('.').pop()||'').toLowerCase();
+    if(['zip','rar','7z','tar','gz','bz2','xz'].includes(ext)) return '📦';
+    if(ext==='pdf') return '📕';
+    if(['doc','docx','md','txt'].includes(ext)) return '📘';
+    if(['xls','xlsx','csv'].includes(ext)) return '📗';
+    if(['ppt','pptx'].includes(ext)) return '📙';
+    if(['mp3','wav','flac','aac','ogg','m4a'].includes(ext)) return '🎵';
+    if(['exe','apk','dmg','deb','msi'].includes(ext)) return '⚙️';
+    return '📄';
+  }
+
+  let maxSizeMB=100;
 
   // ================= Toast =================
   function toast(msg, type){
@@ -368,13 +436,14 @@
       });
       if(r.status===404) return {preview:true};
       const data=await r.json().catch(()=>({}));
-      if(r.ok) return {ok:true};
+      if(r.ok) return {ok:true, maxMB:data.maxMB};
       if(r.status===401) return {ok:false, msg:data.error||'密码错误'};
       return {ok:false, msg:data.error||('服务端错误 '+r.status)};
     }catch(e){ return {preview:true}; }
   }
 
-  function unlock(){
+  function unlock(maxMB){
+    if(maxMB){ maxSizeMB=maxMB; $('maxMBVal').textContent=maxMB; }
     lockScreen.classList.add('hidden');
     mainApp.classList.add('unlocked');
     loadCloud(false);
@@ -383,7 +452,7 @@
   function showPreviewBanner(){
     const b=document.createElement('div');
     b.className='preview-banner';
-    b.textContent='⚠️ 当前为静态预览模式：界面可完整体验，上传与云端图库需部署到 EO / ESA / CF 并配置环境变量后生效';
+    b.textContent='⚠️ 当前为静态预览模式：界面可完整体验，上传与云端文件需部署到 EO / ESA / CF 并配置环境变量后生效';
     mainApp.insertBefore(b, mainApp.children[1]);
   }
 
@@ -399,7 +468,7 @@
       }
       return;
     }
-    if(r.ok){ localStorage.setItem(PWD_KEY,password); lockErr.textContent=''; unlock(); }
+    if(r.ok){ localStorage.setItem(PWD_KEY,password); lockErr.textContent=''; unlock(r.maxMB); }
     else{
       if(fromAuto){ localStorage.removeItem(PWD_KEY); lockScreen.classList.remove('hidden'); lockErr.textContent=r.msg; }
       else{ lockErr.textContent=r.msg; lockbox.classList.remove('shake'); void lockbox.offsetWidth; lockbox.classList.add('shake'); }
@@ -430,12 +499,17 @@
   let uploading=false;
   const pending=[];
 
+  function fmtSize(bytes){
+    if(bytes>=1048576) return (bytes/1048576).toFixed(1)+' MB';
+    return (bytes/1024).toFixed(0)+' KB';
+  }
+
   function handleFiles(files){
-    const imgs=files.filter(f=>f.type.startsWith('image/'));
-    if(!imgs.length){ toast('请选择图片文件','err'); return; }
-    const overs=imgs.filter(f=>f.size>10*1024*1024);
-    overs.forEach(f=>toast(f.name+' 超过 10MB，已跳过','err'));
-    const ok=imgs.filter(f=>f.size<=10*1024*1024);
+    if(!files.length) return;
+    const maxBytes=maxSizeMB*1024*1024;
+    const overs=files.filter(f=>f.size>maxBytes);
+    overs.forEach(f=>toast(f.name+' 超过 '+maxSizeMB+'MB，已跳过','err'));
+    const ok=files.filter(f=>f.size<=maxBytes);
     if(!ok.length) return;
     ok.forEach(f=>pending.push({file:f, el:buildQItem(f)}));
     queue.classList.add('has');
@@ -445,10 +519,13 @@
   function buildQItem(file){
     const el=document.createElement('div');
     el.className='qitem';
+    const thumb=file.type.startsWith('image/')
+      ? '<img src="'+URL.createObjectURL(file)+'">'
+      : '<div class="qico">'+(fileTypeOf(file.name)==='video'?'🎬':fileIcon(file.name))+'</div>';
     el.innerHTML=
-      '<img src="'+URL.createObjectURL(file)+'">'+
+      thumb+
       '<div class="info"><div class="name">'+escapeHtml(file.name)+'</div>'+
-      '<div class="st">排队中 · '+(file.size/1024).toFixed(0)+' KB</div>'+
+      '<div class="st">排队中 · '+fmtSize(file.size)+'</div>'+
       '<div class="qbar"><i></i></div></div>'+
       '<div class="qact"></div>';
     return el;
@@ -464,7 +541,7 @@
 
   function maybeCompress(file){
     return new Promise(resolve=>{
-      if(!webpToggle.checked || file.type==='image/gif' || file.type==='image/svg+xml') return resolve(file);
+      if(!webpToggle.checked || !file.type.startsWith('image/') || file.type==='image/gif' || file.type==='image/svg+xml') return resolve(file);
       const img=new Image();
       img.onload=()=>{
         const c=document.createElement('canvas');
@@ -486,7 +563,7 @@
       const item=pending.shift();
       queue.appendChild(item.el);
       try{
-        setQ(item, 12, '压缩处理中…');
+        setQ(item, 12, fileTypeOf(item.file.name)==='image'?'压缩处理中…':'准备上传…');
         const file=await maybeCompress(item.file);
 
         setQ(item, 30, '获取签名…');
@@ -505,14 +582,14 @@
         const ur=await fetch(sign.host,{method:'POST',body:fd});
         if(!ur.ok) throw new Error('OSS 返回 '+ur.status);
 
-        setQ(item, 100, '✓ 完成 · '+(file.size/1024).toFixed(0)+' KB', 'ok');
+        setQ(item, 100, '✓ 完成 · '+fmtSize(file.size)+' → '+sign.dir, 'ok');
         const act=item.el.querySelector('.qact');
         const btn=document.createElement('button');
         btn.className='qbtn primary'; btn.textContent='复制链接';
         btn.addEventListener('click',()=>{ navigator.clipboard.writeText(sign.url); toast('链接已复制','ok'); });
         act.appendChild(btn);
         addHistory(sign.url);
-        prependCloudItem({key:sign.fields.key, time:new Date().toISOString(), size:file.size, url:sign.url});
+        prependCloudItem({key:sign.fields.key, time:new Date().toISOString(), size:file.size, url:sign.url, type:fileTypeOf(sign.fields.key)});
         toast(file.name+' 上传成功','ok');
       }catch(e){
         setQ(item, 100, '✗ '+(e.message||'上传失败'), 'err');
@@ -522,9 +599,27 @@
     uploading=false;
   }
 
-  // ================= 云端图库 =================
+  // ================= 云端文件 =================
   let cloudToken='';
   let cloudItems=[];
+  let curDir='all';
+  const TYPE_DIR={image:'img',video:'video',other:'other'};
+
+  // 目录标签页切换
+  $('dirTabs').addEventListener('click',e=>{
+    const tab=e.target.closest('.tab');
+    if(!tab || tab.dataset.dir===curDir) return;
+    curDir=tab.dataset.dir;
+    [...$('dirTabs').children].forEach(t=>t.classList.toggle('active',t===tab));
+    loadCloud(false);
+  });
+
+  function gridTile(f){
+    const t=f.type||fileTypeOf(f.key);
+    if(t==='image') return '<img loading="lazy" src="'+f.url+'" alt="">';
+    if(t==='video') return '<video muted preload="metadata" src="'+f.url+'"></video><div class="badge">🎬 视频</div>';
+    return '<div class="ftile"><div class="fico">'+fileIcon(f.key)+'</div><div class="fext">'+escapeHtml((f.key.split('.').pop()||'file').slice(0,6))+'</div></div>';
+  }
 
   function renderCloud(filter){
     const list=$('cloudList');
@@ -533,19 +628,20 @@
     const items=kw? cloudItems.filter(f=>f.key.toLowerCase().includes(kw)) : cloudItems;
     $('cloudCount').textContent=kw? `（筛选出 ${items.length} / 共 ${cloudItems.length}）` : (cloudItems.length?`（${cloudItems.length}）`:'');
     if(!items.length){
-      list.innerHTML='<div class="empty" style="grid-column:1/-1">'+(kw?'没有匹配的文件':'桶里还没有图片，传一张试试 ↑')+'</div>';
+      list.innerHTML='<div class="empty" style="grid-column:1/-1">'+(kw?'没有匹配的文件':'这个目录还是空的，传一个试试 ↑')+'</div>';
       return;
     }
     items.forEach((f,i)=>{
       const d=document.createElement('div');
       d.className='gitem'; d.style.animationDelay=(Math.min(i,12)*0.03)+'s';
-      d.innerHTML='<img loading="lazy" src="'+f.url+'" alt=""><div class="mask"><span>'+escapeHtml(f.key.split('/').pop())+'</span></div>';
+      d.innerHTML=gridTile(f)+'<div class="mask"><span>'+escapeHtml(f.key.split('/').pop())+'</span></div>';
       d.addEventListener('click',()=>openLightbox(f));
       list.appendChild(d);
     });
   }
 
   function prependCloudItem(f){
+    if(curDir!=='all' && TYPE_DIR[f.type]!==curDir) return; // 不在当前目录就不插入
     cloudItems.unshift(f);
     renderCloud($('cloudSearch').value);
   }
@@ -560,12 +656,12 @@
     try{
       const r=await fetch('/api/list',{
         method:'POST', headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({password:getPwd(), token:append?cloudToken:''})
+        body:JSON.stringify({password:getPwd(), token:append?cloudToken:'', dir:curDir})
       });
       if(r.status===404){
         list.innerHTML='';
         hint.style.display='block';
-        hint.textContent='静态预览模式：云端图库需部署后使用';
+        hint.textContent='静态预览模式：云端文件需部署后使用';
         return;
       }
       const data=await r.json();
@@ -578,7 +674,7 @@
       list.innerHTML='';
       hint.style.display='block';
       const offline=/failed to fetch|networkerror|load failed/i.test(e.message||'');
-      hint.textContent=offline?'静态预览模式：云端图库需部署后使用':'加载失败：'+e.message;
+      hint.textContent=offline?'静态预览模式：云端文件需部署后使用':'加载失败：'+e.message;
     }
   }
 
@@ -590,17 +686,36 @@
   let lbCurrent=null;
   function openLightbox(f){
     lbCurrent=f;
-    lbImg.src=f.url;
-    lbMeta.innerHTML=escapeHtml(f.key)+'<br>'+(f.size?(f.size/1024).toFixed(1)+' KB · ':'')+(f.time?new Date(f.time).toLocaleString():'');
+    const t=f.type||fileTypeOf(f.key);
+    const name=f.key.split('/').pop();
+    if(t==='image'){
+      lbMedia.innerHTML='<img src="'+f.url+'" alt="">';
+      $('lbCopyMd').style.display='';
+      $('lbOpen').style.display='none';
+    }else if(t==='video'){
+      lbMedia.innerHTML='<video controls playsinline src="'+f.url+'"></video>';
+      $('lbCopyMd').style.display='none';
+      $('lbOpen').style.display='none';
+    }else{
+      lbMedia.innerHTML='<div class="lb-file"><div class="fico">'+fileIcon(f.key)+'</div><div class="fname">'+escapeHtml(name)+'</div></div>';
+      $('lbCopyMd').style.display='none';
+      $('lbOpen').style.display='';
+    }
+    lbMeta.innerHTML=escapeHtml(f.key)+'<br>'+(f.size?fmtSize(f.size)+' · ':'')+(f.time?new Date(f.time).toLocaleString():'');
     resetDeleteBtn();
     lightbox.classList.add('show');
   }
-  function closeLightbox(){ lightbox.classList.remove('show'); lbCurrent=null; }
+  function closeLightbox(){
+    lightbox.classList.remove('show');
+    lbMedia.innerHTML=''; // 停止视频播放
+    lbCurrent=null;
+  }
   $('lbClose').addEventListener('click',closeLightbox);
   lightbox.addEventListener('click',e=>{ if(e.target===lightbox) closeLightbox(); });
   window.addEventListener('keydown',e=>{ if(e.key==='Escape') closeLightbox(); });
   $('lbCopy').addEventListener('click',()=>{ if(lbCurrent){ navigator.clipboard.writeText(lbCurrent.url); toast('链接已复制','ok'); } });
   $('lbCopyMd').addEventListener('click',()=>{ if(lbCurrent){ navigator.clipboard.writeText('![img]('+lbCurrent.url+')'); toast('Markdown 已复制','ok'); } });
+  $('lbOpen').addEventListener('click',()=>{ if(lbCurrent) window.open(lbCurrent.url,'_blank'); });
 
   function resetDeleteBtn(){
     const b=$('lbDelete');
@@ -644,10 +759,14 @@
     const h=getHist(), card=$('historyCard'), list=$('historyList');
     if(!h.length){ card.style.display='none'; return; }
     card.style.display='block'; list.innerHTML='';
-    h.forEach((it,i)=>{
+    h.forEach(it=>{
       const d=document.createElement('div');
       d.className='gitem';
-      d.innerHTML='<img loading="lazy" src="'+it.url+'"><div class="mask"><span>点击复制链接</span></div>';
+      const t=fileTypeOf(it.url.split('?')[0]);
+      if(t==='image') d.innerHTML='<img loading="lazy" src="'+it.url+'">';
+      else if(t==='video') d.innerHTML='<div class="ftile"><div class="fico">🎬</div><div class="fext">video</div></div>';
+      else d.innerHTML='<div class="ftile"><div class="fico">'+fileIcon(it.url)+'</div><div class="fext">'+escapeHtml((it.url.split('.').pop()||'file').slice(0,6))+'</div></div>';
+      d.innerHTML+='<div class="mask"><span>点击复制链接</span></div>';
       d.addEventListener('click',()=>{ navigator.clipboard.writeText(it.url); toast('链接已复制','ok'); });
       list.appendChild(d);
     });
