@@ -2,9 +2,9 @@
 // OSS 文件列表函数 —— EdgeOne Pages Functions / Cloudflare Pages Functions 通用版
 // 路由：POST /api/list
 // 原理：服务端用 AccessKey 签名调用 OSS ListObjectsV2，返回文件列表。
-//       仅允许列出 img/ 前缀，密钥不出服务端。
-// 请求体：{ password, token? }   token 为分页游标（首次不传）
-// 返回：{ files:[{key,size,time,url}], nextToken, truncated }
+//       仅允许列出 upweb/ 前缀，密钥不出服务端。
+// 请求体：{ password, token?, dir? }   token 为分页游标，dir ∈ all/img/video/other
+// 返回：{ files:[{key,size,time,type,url}], nextToken, truncated }
 // 环境变量与 sign.js 相同。
 // ============================================================
 
@@ -35,6 +35,24 @@ function xmlUnescape(s) {
     .replace(/&amp;/g, '&');
 }
 
+// 目录白名单：前端可选 全部 / 图片 / 视频 / 其他
+const DIR_PREFIX = {
+  all: 'upweb/',
+  img: 'upweb/img/',
+  video: 'upweb/video/',
+  other: 'upweb/other/',
+};
+
+const IMG_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'avif', 'bmp', 'ico', 'tiff'];
+const VIDEO_EXTS = ['mp4', 'webm', 'mov', 'mkv', 'm4v', 'avi', 'flv', 'ts'];
+
+function typeOf(key) {
+  const ext = (key.split('.').pop() || '').toLowerCase();
+  if (IMG_EXTS.includes(ext)) return 'image';
+  if (VIDEO_EXTS.includes(ext)) return 'video';
+  return 'other';
+}
+
 // OSS ListObjectsV2（GET Bucket），V1 签名。
 // 使用 x-oss-date 替代 Date 头（边缘运行时会改写 Date），
 // StringToSign = GET\n\n\n\nx-oss-date:<date>\n/<bucket>/?list-type=2
@@ -42,13 +60,14 @@ function xmlUnescape(s) {
 // 自愈机制：若签名被 OSS 拒绝（SignatureDoesNotMatch），错误 XML 中会带
 // <StringToSign> —— 那是 OSS 服务端按实际收到的请求计算出的待签字符串。
 // 用它重新签名并重试一次，可自动适应任何规范化差异（例如边缘运行时改写/新增请求头）。
-async function listObjects(env, token) {
+async function listObjects(env, token, dir) {
   const bucket = env.OSS_BUCKET;
   const endpoint = env.OSS_ENDPOINT;
+  const prefix = DIR_PREFIX[dir] || DIR_PREFIX.all;
 
   const params = new URLSearchParams({
     'list-type': '2',
-    prefix: 'img/',
+    prefix: prefix,
     'max-keys': '60',
   });
   if (token) params.set('continuation-token', token);
@@ -91,11 +110,13 @@ async function listObjects(env, token) {
   const re = /<Contents>[\s\S]*?<Key>([\s\S]*?)<\/Key>[\s\S]*?<LastModified>([\s\S]*?)<\/LastModified>[\s\S]*?<Size>(\d+)<\/Size>[\s\S]*?<\/Contents>/g;
   let m;
   while ((m = re.exec(xml)) !== null) {
+    const key = xmlUnescape(m[1]);
     files.push({
-      key: xmlUnescape(m[1]),
+      key: key,
       time: m[2],
       size: parseInt(m[3], 10),
-      url: env.PUBLIC_URL_BASE.replace(/\/$/, '') + '/' + m[1],
+      type: typeOf(key),
+      url: env.PUBLIC_URL_BASE.replace(/\/$/, '') + '/' + key,
     });
   }
 
@@ -127,7 +148,7 @@ async function handle(request, env) {
   }
 
   try {
-    const result = await listObjects(env, body.token || '');
+    const result = await listObjects(env, body.token || '', String(body.dir || 'all'));
     return jsonResponse(result);
   } catch (e) {
     return jsonResponse({ error: e.message }, 502);

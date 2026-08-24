@@ -1,7 +1,7 @@
 // ============================================================
 // OSS 文件删除函数 —— EdgeOne Pages Functions / Cloudflare Pages Functions 通用版
 // 路由：POST /api/delete
-// 原理：服务端用 AccessKey 签名调用 OSS DeleteObject，仅允许删除 img/ 前缀。
+// 原理：服务端用 AccessKey 签名调用 OSS DeleteObject，仅允许删除 upweb/ 前缀。
 // 请求体：{ password, key }
 // 环境变量与 sign.js 相同。RAM 子账号需授予 oss:DeleteObject 权限。
 // ============================================================
@@ -96,8 +96,8 @@ async function handle(request, env) {
   }
 
   const key = String(body.key || '');
-  if (!key.startsWith('img/') || key.includes('..')) {
-    return jsonResponse({ error: '仅允许删除 img/ 前缀下的文件' }, 400);
+  if (!key.startsWith('upweb/') || key.includes('..')) {
+    return jsonResponse({ error: '仅允许删除 upweb/ 前缀下的文件' }, 400);
   }
 
   try {
