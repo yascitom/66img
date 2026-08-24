@@ -23,26 +23,54 @@ async function hmacSha1Base64(secret, message) {
   return btoa(String.fromCharCode(...new Uint8Array(sig)));
 }
 
-// OSS DeleteObject。同 list.js：用 x-oss-date 替代 Date 头（边缘运行时会改写 Date），
+function xmlUnescape(s) {
+  return s
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+// OSS DeleteObject。使用 x-oss-date 替代 Date 头（边缘运行时会改写 Date），
 // StringToSign = DELETE\n\n\n\nx-oss-date:<date>\n/<bucket>/<key>
+//
+// 自愈机制同 list.js：签名被拒时用 OSS 返回的 <StringToSign> 重签重试一次。
 async function deleteObject(env, key) {
   const bucket = env.OSS_BUCKET;
   const endpoint = env.OSS_ENDPOINT;
-  const date = new Date().toUTCString();
-  const stringToSign = 'DELETE\n\n\n\nx-oss-date:' + date + '\n/' + bucket + '/' + key;
-  const signature = await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, stringToSign);
+  const url = `https://${bucket}.${endpoint}/${key.split('/').map(encodeURIComponent).join('/')}`;
 
-  const r = await fetch(`https://${bucket}.${endpoint}/${key.split('/').map(encodeURIComponent).join('/')}`, {
-    method: 'DELETE',
-    headers: {
-      'x-oss-date': date,
-      Authorization: `OSS ${env.OSS_ACCESS_KEY_ID}:${signature}`,
-    },
-  });
+  const date = new Date().toUTCString();
+  const myStringToSign = 'DELETE\n\n\n\nx-oss-date:' + date + '\n/' + bucket + '/' + key;
+  const headers = {
+    'x-oss-date': date,
+    Authorization: `OSS ${env.OSS_ACCESS_KEY_ID}:${await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, myStringToSign)}`,
+  };
+
+  let r = await fetch(url, { method: 'DELETE', headers });
+
   if (!r.ok && r.status !== 204) {
     const xml = await r.text();
     const code = (xml.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
-    throw new Error('OSS 删除失败：' + code);
+    const ossString = (xml.match(/<StringToSign>([\s\S]*?)<\/StringToSign>/) || [])[1];
+
+    if (code === 'SignatureDoesNotMatch' && ossString) {
+      const ossStr = xmlUnescape(ossString);
+      headers.Authorization = `OSS ${env.OSS_ACCESS_KEY_ID}:${await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, ossStr)}`;
+      r = await fetch(url, { method: 'DELETE', headers });
+      if (!r.ok && r.status !== 204) {
+        const xml2 = await r.text();
+        const code2 = (xml2.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
+        throw new Error(
+          'OSS 删除失败：' + code2 +
+          '（已按 OSS 签名串重试仍失败）｜OSS期望[' + ossStr.replace(/\n/g, '⏎') +
+          ']｜我方[' + myStringToSign.replace(/\n/g, '⏎') + ']'
+        );
+      }
+    } else {
+      throw new Error('OSS 删除失败：' + code);
+    }
   }
 }
 

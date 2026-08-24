@@ -25,11 +25,23 @@ async function hmacSha1Base64(secret, message) {
   return btoa(String.fromCharCode(...new Uint8Array(sig)));
 }
 
+// XML 反转义（OSS 返回的 StringToSign 里可能含 &amp; 等实体）
+function xmlUnescape(s) {
+  return s
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
 // OSS ListObjectsV2（GET Bucket），V1 签名。
-// 注意：边缘运行时（EO/CF/ESA）会拦截改写 Date 请求头，导致 SignatureDoesNotMatch，
-// 因此使用 OSS 官方支持的 x-oss-date 替代：StringToSign 中 Date 留空，
-// x-oss-date 进 CanonicalizedOSSHeaders：
+// 使用 x-oss-date 替代 Date 头（边缘运行时会改写 Date），
 // StringToSign = GET\n\n\n\nx-oss-date:<date>\n/<bucket>/?list-type=2
+//
+// 自愈机制：若签名被 OSS 拒绝（SignatureDoesNotMatch），错误 XML 中会带
+// <StringToSign> —— 那是 OSS 服务端按实际收到的请求计算出的待签字符串。
+// 用它重新签名并重试一次，可自动适应任何规范化差异（例如边缘运行时改写/新增请求头）。
 async function listObjects(env, token) {
   const bucket = env.OSS_BUCKET;
   const endpoint = env.OSS_ENDPOINT;
@@ -40,22 +52,39 @@ async function listObjects(env, token) {
     'max-keys': '60',
   });
   if (token) params.set('continuation-token', token);
+  const url = `https://${bucket}.${endpoint}/?${params.toString()}`;
 
   const date = new Date().toUTCString();
-  const stringToSign = 'GET\n\n\n\nx-oss-date:' + date + '\n/' + bucket + '/?list-type=2';
-  const signature = await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, stringToSign);
+  const myStringToSign = 'GET\n\n\n\nx-oss-date:' + date + '\n/' + bucket + '/?list-type=2';
+  const headers = {
+    'x-oss-date': date,
+    Authorization: `OSS ${env.OSS_ACCESS_KEY_ID}:${await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, myStringToSign)}`,
+  };
 
-  const r = await fetch(`https://${bucket}.${endpoint}/?${params.toString()}`, {
-    headers: {
-      'x-oss-date': date,
-      Authorization: `OSS ${env.OSS_ACCESS_KEY_ID}:${signature}`,
-    },
-  });
+  let r = await fetch(url, { headers });
+  let xml = await r.text();
 
-  const xml = await r.text();
   if (!r.ok) {
     const code = (xml.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
-    throw new Error('OSS 列表请求失败：' + code);
+    const ossString = (xml.match(/<StringToSign>([\s\S]*?)<\/StringToSign>/) || [])[1];
+
+    // 自愈重试：用 OSS 服务端算出的 StringToSign 重新签名
+    if (code === 'SignatureDoesNotMatch' && ossString) {
+      const ossStr = xmlUnescape(ossString);
+      headers.Authorization = `OSS ${env.OSS_ACCESS_KEY_ID}:${await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, ossStr)}`;
+      r = await fetch(url, { headers });
+      xml = await r.text();
+      if (!r.ok) {
+        const code2 = (xml.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
+        throw new Error(
+          'OSS 列表请求失败：' + code2 +
+          '（已按 OSS 签名串重试仍失败）｜OSS期望[' + ossStr.replace(/\n/g, '⏎') +
+          ']｜我方[' + myStringToSign.replace(/\n/g, '⏎') + ']'
+        );
+      }
+    } else {
+      throw new Error('OSS 列表请求失败：' + code);
+    }
   }
 
   const files = [];
@@ -63,7 +92,7 @@ async function listObjects(env, token) {
   let m;
   while ((m = re.exec(xml)) !== null) {
     files.push({
-      key: m[1],
+      key: xmlUnescape(m[1]),
       time: m[2],
       size: parseInt(m[3], 10),
       url: env.PUBLIC_URL_BASE.replace(/\/$/, '') + '/' + m[1],
