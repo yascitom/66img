@@ -1,6 +1,6 @@
-# 云汀云盘（传图/视频/文件 → 拿链接 · Web 版）
+# 云窝（传图/视频/文件 → 拿链接 · Web 版）
 
-配合「阿里云 OSS → Cloudflare 免流」教程使用的私有图床 + 小型网盘，界面优雅、功能完整：
+私有图床 + 小型网盘：配合「阿里云 OSS → Cloudflare 免流」教程使用，界面优雅、功能完整：
 
 > 📖 配套教程：[奈溪论坛 · 阿里云 OSS + Cloudflare 免流图床教程](https://forum.naixi.net/thread-9085-1-1.html) ｜ [NodeSeek · 同教程帖子](https://www.nodeseek.com/post-586574-1)
 
