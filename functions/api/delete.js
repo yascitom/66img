@@ -74,15 +74,16 @@ async function deleteObject(env, key) {
   }
 }
 
+// SHA-256 → hex（Web Crypto）
+async function sha256Hex(s) {
+  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(s == null ? '' : s)));
+  return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 // 密码校验：SHA-256 哈希后比对；失败统一延迟 ~0.4s，拖慢在线暴力破解
 async function pwdOk(input, expected) {
   if (!expected) return true;
-  const enc = new TextEncoder();
-  async function h(s) {
-    const d = await crypto.subtle.digest('SHA-256', enc.encode(String(s == null ? '' : s)));
-    return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
-  }
-  return (await h(input)) === (await h(expected));
+  return (await sha256Hex(input)) === (await sha256Hex(expected));
 }
 
 async function rejectAuth() {
@@ -128,11 +129,33 @@ async function readToken(token, secret) {
   } catch { return null; }
 }
 
-// 统一鉴权：密码 或 登录令牌（body.auth）任一通过即可（匿名模式下密码为空恒通过）
+// 令牌派生密钥：HMAC(SK, 版本标识 | Bucket | 密码哈希)——改密码即作废全部令牌，
+// 不同 Bucket 的部署实例令牌互不通用；与 sign.js 相同实现，不新增环境变量。
+async function tokenKey(env) {
+  const fp = await sha256Hex(env.UPLOAD_PASSWORD || '');
+  return hmacSha256B64url(env.OSS_ACCESS_KEY_SECRET, 'yunwo-auth-v1|' + env.OSS_BUCKET + '|' + fp);
+}
+
+// 统一鉴权：返回 'pwd'（密码通过）/ 'token'（令牌通过）/ null（失败）
 async function verifyAuth(body, env) {
-  if (await pwdOk(body.password, env.UPLOAD_PASSWORD)) return true;
-  const p = await readToken(body.auth, env.OSS_ACCESS_KEY_SECRET);
-  return !!(p && p.t === 'auth');
+  if (await pwdOk(body.password, env.UPLOAD_PASSWORD)) return 'pwd';
+  const p = await readToken(body.auth, await tokenKey(env));
+  return (p && p.t === 'auth') ? 'token' : null;
+}
+
+// 请求硬化：限制请求体与敏感字段长度（与 sign.js 相同实现）
+const MAX_BODY_BYTES = 8192;
+function badInput(body) {
+  if (!body || typeof body !== 'object') return '请求体必须是 JSON 对象';
+  const limits = { password: 128, auth: 2048, key: 512 };
+  for (const k of Object.keys(limits)) {
+    if (typeof body[k] === 'string' && body[k].length > limits[k]) return '参数非法';
+  }
+  return '';
+}
+function bodyTooLarge(request) {
+  const cl = parseInt(request.headers.get('Content-Length') || '0', 10);
+  return cl > MAX_BODY_BYTES;
 }
 
 // key 白名单：upweb/ 前缀 + 安全字符集（字母数字 . _ - /），禁 .. 与可注入字符
@@ -154,12 +177,16 @@ async function handle(request, env) {
   const cfgErr = authConfigError(env);
   if (cfgErr) return jsonResponse({ error: cfgErr }, 500);
 
+  if (bodyTooLarge(request)) return jsonResponse({ error: '请求体过大' }, 413);
+
   let body;
   try {
     body = await request.json();
   } catch {
     return jsonResponse({ error: '请求体必须是 JSON' }, 400);
   }
+  const inputErr = badInput(body);
+  if (inputErr) return jsonResponse({ error: inputErr }, 400);
 
   if (!(await verifyAuth(body, env))) {
     return rejectAuth();
