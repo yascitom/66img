@@ -36,15 +36,16 @@ async function hmacSha1Base64(secret, message) {
   return btoa(String.fromCharCode(...new Uint8Array(sig)));
 }
 
+// SHA-256 → hex（Web Crypto）
+async function sha256Hex(s) {
+  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(s == null ? '' : s)));
+  return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
 // 密码校验：SHA-256 哈希后比对；失败统一延迟 ~0.4s，拖慢在线暴力破解
 async function pwdOk(input, expected) {
   if (!expected) return true;
-  const enc = new TextEncoder();
-  async function h(s) {
-    const d = await crypto.subtle.digest('SHA-256', enc.encode(String(s == null ? '' : s)));
-    return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
-  }
-  return (await h(input)) === (await h(expected));
+  return (await sha256Hex(input)) === (await sha256Hex(expected));
 }
 
 async function rejectAuth() {
@@ -81,7 +82,7 @@ async function hmacSha256B64url(secret, message) {
   return b64urlEncode(String.fromCharCode(...new Uint8Array(sig)));
 }
 
-// 签发令牌：base64url(payload JSON) + '.' + 签名；密钥用 OSS SK，不新增环境变量
+// 签发令牌：base64url(payload JSON) + '.' + 签名；密钥为派生密钥（见 tokenKey）
 async function makeToken(payload, secret) {
   const body = b64urlEncode(JSON.stringify(payload));
   return body + '.' + (await hmacSha256B64url(secret, body));
@@ -101,18 +102,44 @@ async function readToken(token, secret) {
   } catch { return null; }
 }
 
-// 登录会话令牌（7 天）：代替前端长期保存明文密码
-const AUTH_TOKEN_TTL = 7 * 24 * 3600;
-async function makeAuthToken(env) {
-  return makeToken({ t: 'auth', e: Math.floor(Date.now() / 1000) + AUTH_TOKEN_TTL }, env.OSS_ACCESS_KEY_SECRET);
+// 令牌派生密钥：HMAC(SK, 版本标识 | Bucket | 密码哈希)
+// → 修改 UPLOAD_PASSWORD 立即作废全部已签发令牌（密钥变了，旧签名验不过）；
+//   不同 Bucket 的部署实例之间令牌互不通用（防跨实例认证绕过）；无需新增环境变量。
+async function tokenKey(env) {
+  const fp = await sha256Hex(env.UPLOAD_PASSWORD || '');
+  return hmacSha256B64url(env.OSS_ACCESS_KEY_SECRET, 'yunwo-auth-v1|' + env.OSS_BUCKET + '|' + fp);
 }
 
-// 统一鉴权：密码 或 登录令牌（body.auth）任一通过即可（匿名模式下密码为空恒通过）
+// 登录会话令牌：7 天硬到期、不续期——到期必须重新输入密码。
+// 防止"令牌换令牌"无限续期导致事实上的永久会话。
+const AUTH_TOKEN_TTL = 7 * 24 * 3600;
+async function makeAuthToken(env) {
+  return makeToken({ t: 'auth', e: Math.floor(Date.now() / 1000) + AUTH_TOKEN_TTL }, await tokenKey(env));
+}
+
+// 统一鉴权：返回 'pwd'（密码通过）/ 'token'（令牌通过）/ null（失败）
+// 匿名模式（显式 ALLOW_ANONYMOUS_UPLOAD=true）下密码为空恒通过，返回 'pwd'
 // 注意：令牌字段名用 auth，避免与 list.js 的分页游标 token 冲突
 async function verifyAuth(body, env) {
-  if (await pwdOk(body.password, env.UPLOAD_PASSWORD)) return true;
-  const p = await readToken(body.auth, env.OSS_ACCESS_KEY_SECRET);
-  return !!(p && p.t === 'auth');
+  if (await pwdOk(body.password, env.UPLOAD_PASSWORD)) return 'pwd';
+  const p = await readToken(body.auth, await tokenKey(env));
+  return (p && p.t === 'auth') ? 'token' : null;
+}
+
+// 请求硬化：限制请求体与敏感字段长度，防畸形请求消耗边缘函数资源
+// （真正的按 IP 限流需在平台 WAF 层配置，见 README「安全提示」）
+const MAX_BODY_BYTES = 8192;
+function badInput(body) {
+  if (!body || typeof body !== 'object') return '请求体必须是 JSON 对象';
+  const limits = { password: 128, auth: 2048, session: 2048, token: 2048, filename: 256, dir: 16 };
+  for (const k of Object.keys(limits)) {
+    if (typeof body[k] === 'string' && body[k].length > limits[k]) return '参数非法';
+  }
+  return '';
+}
+function bodyTooLarge(request) {
+  const cl = parseInt(request.headers.get('Content-Length') || '0', 10);
+  return cl > MAX_BODY_BYTES;
 }
 
 const IMG_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'avif', 'bmp', 'ico', 'tiff'];
@@ -144,23 +171,30 @@ async function handle(request, env) {
   const cfgErr = authConfigError(env);
   if (cfgErr) return jsonResponse({ error: cfgErr }, 500);
 
+  if (bodyTooLarge(request)) return jsonResponse({ error: '请求体过大' }, 413);
+
   let body;
   try {
     body = await request.json();
   } catch {
     return jsonResponse({ error: '请求体必须是 JSON' }, 400);
   }
+  const inputErr = badInput(body);
+  if (inputErr) return jsonResponse({ error: inputErr }, 400);
 
   const maxMB = parseInt(env.MAX_SIZE_MB, 10) || 100;
   const maxSize = maxMB * 1024 * 1024;
 
   // 密码预检：前端登录门禁专用，只验证身份、不生成签名。
-  // 通过后签发 7 天登录令牌，前端此后不再保存明文密码。
+  // 仅密码验证通过才签发 7 天登录令牌；持令牌预检不续签（7 天硬到期后重新输密码）。
   if (body.check === true) {
-    if (!(await verifyAuth(body, env))) {
+    const authBy = await verifyAuth(body, env);
+    if (!authBy) {
       return rejectAuth();
     }
-    return jsonResponse({ ok: true, needPassword: !!env.UPLOAD_PASSWORD, maxMB, token: await makeAuthToken(env) });
+    const resp = { ok: true, needPassword: !!env.UPLOAD_PASSWORD, maxMB };
+    if (authBy === 'pwd' && env.UPLOAD_PASSWORD) resp.token = await makeAuthToken(env);
+    return jsonResponse(resp);
   }
 
   // 上传鉴权（密码或登录令牌）
@@ -175,12 +209,15 @@ async function handle(request, env) {
 
   const objectKey = makeObjectKey(body.filename || 'file.bin');
 
-  // PostObject Policy：10 分钟有效，大小受限，key 精确绑定本次生成的对象键（不可改写到其他路径）
+  // PostObject Policy：10 分钟有效；大小受限；bucket 与 key 精确绑定本次生成；
+  // x-oss-forbid-overwrite 也写进 Policy 条件，客户端无法剥离该字段来覆盖已有对象
   const policyObj = {
     expiration: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
     conditions: [
+      { bucket: env.OSS_BUCKET },
       ['content-length-range', 1, maxSize],
       ['eq', '$key', objectKey],
+      ['eq', '$x-oss-forbid-overwrite', 'true'],
     ],
   };
   const policy = btoa(JSON.stringify(policyObj));
