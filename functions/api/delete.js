@@ -2,7 +2,7 @@
 // OSS 文件删除函数 —— EdgeOne Pages Functions / Cloudflare Pages Functions 通用版
 // 路由：POST /api/delete
 // 原理：服务端用 AccessKey 签名调用 OSS DeleteObject，仅允许删除 upweb/ 前缀。
-// 请求体：{ password, key }
+// 请求体：{ auth 或 password, key }
 // 环境变量与 sign.js 相同。RAM 子账号需授予 oss:DeleteObject 权限。
 // ============================================================
 
@@ -87,7 +87,52 @@ async function pwdOk(input, expected) {
 
 async function rejectAuth() {
   await new Promise(r => setTimeout(r, 400));
-  return jsonResponse({ error: '上传密码错误' }, 401);
+  return jsonResponse({ error: '上传密码错误或会话已过期' }, 401);
+}
+
+// ============================================================
+// 鉴权配置（fail-closed）与 HMAC 会话令牌（与 sign.js 相同实现）
+// ============================================================
+function authConfigError(env) {
+  const p = env.UPLOAD_PASSWORD;
+  if (!p) {
+    if (String(env.ALLOW_ANONYMOUS_UPLOAD || '') === 'true') return '';
+    return '服务端未配置 UPLOAD_PASSWORD，已拒绝服务。请在平台环境变量中设置上传密码（≥10 位）；如确需完全公开，显式设置 ALLOW_ANONYMOUS_UPLOAD=true';
+  }
+  if (String(p).length < 10) {
+    return 'UPLOAD_PASSWORD 强度不足（至少需 10 位），已拒绝服务。请在平台环境变量中修改为强密码';
+  }
+  return '';
+}
+
+function b64urlEncode(s) { return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+function b64urlDecode(s) { return atob(s.replace(/-/g, '+').replace(/_/g, '/')); }
+
+async function hmacSha256B64url(secret, message) {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const sig = await crypto.subtle.sign('HMAC', key, enc.encode(message));
+  return b64urlEncode(String.fromCharCode(...new Uint8Array(sig)));
+}
+
+async function readToken(token, secret) {
+  if (typeof token !== 'string') return null;
+  const i = token.lastIndexOf('.');
+  if (i <= 0) return null;
+  const body = token.slice(0, i);
+  if ((await hmacSha256B64url(secret, body)) !== token.slice(i + 1)) return null;
+  try {
+    const p = JSON.parse(b64urlDecode(body));
+    if (!p || typeof p.e !== 'number' || p.e < Math.floor(Date.now() / 1000)) return null;
+    return p;
+  } catch { return null; }
+}
+
+// 统一鉴权：密码 或 登录令牌（body.auth）任一通过即可（匿名模式下密码为空恒通过）
+async function verifyAuth(body, env) {
+  if (await pwdOk(body.password, env.UPLOAD_PASSWORD)) return true;
+  const p = await readToken(body.auth, env.OSS_ACCESS_KEY_SECRET);
+  return !!(p && p.t === 'auth');
 }
 
 // key 白名单：upweb/ 前缀 + 安全字符集（字母数字 . _ - /），禁 .. 与可注入字符
@@ -106,6 +151,9 @@ async function handle(request, env) {
     if (!env[k]) return jsonResponse({ error: `服务端缺少环境变量 ${k}` }, 500);
   }
 
+  const cfgErr = authConfigError(env);
+  if (cfgErr) return jsonResponse({ error: cfgErr }, 500);
+
   let body;
   try {
     body = await request.json();
@@ -113,7 +161,7 @@ async function handle(request, env) {
     return jsonResponse({ error: '请求体必须是 JSON' }, 400);
   }
 
-  if (!(await pwdOk(body.password, env.UPLOAD_PASSWORD))) {
+  if (!(await verifyAuth(body, env))) {
     return rejectAuth();
   }
 
