@@ -41,29 +41,51 @@ function makeObjectKey(filename) {
   return `img/${datePath}/${rand}.${ext}`;
 }
 
+// XML 反转义（OSS 返回的 StringToSign 里可能含 &amp; 等实体）
+function xmlUnescape(s) {
+  return s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'").replace(/&amp;/g, '&');
+}
+
 // OSS ListObjectsV2（GET Bucket），V1 签名。
-// 用 x-oss-date 替代 Date 头（边缘运行时受限头会被改写，否则 SignatureDoesNotMatch）
+// 用 x-oss-date 替代 Date 头（边缘运行时受限头会被改写，否则 SignatureDoesNotMatch）。
+// 自愈机制：签名被拒时，OSS 错误 XML 里的 <StringToSign> 是服务端按实际收到的
+// 请求算出的待签字符串，用它重新签名重试一次，可自动适应任何规范化差异。
 async function listObjects(env, token) {
   const bucket = env.OSS_BUCKET;
   const endpoint = env.OSS_ENDPOINT;
   const params = new URLSearchParams({ 'list-type': '2', prefix: 'img/', 'max-keys': '60' });
   if (token) params.set('continuation-token', token);
+  const url = `https://${bucket}.${endpoint}/?${params.toString()}`;
   const date = new Date().toUTCString();
-  const stringToSign = 'GET\n\n\n\nx-oss-date:' + date + '\n/' + bucket + '/?list-type=2';
-  const signature = await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, stringToSign);
-  const r = await fetch(`https://${bucket}.${endpoint}/?${params.toString()}`, {
-    headers: { 'x-oss-date': date, Authorization: `OSS ${env.OSS_ACCESS_KEY_ID}:${signature}` },
-  });
-  const xml = await r.text();
+  const myStringToSign = 'GET\n\n\n\nx-oss-date:' + date + '\n/' + bucket + '/?list-type=2';
+  const headers = {
+    'x-oss-date': date,
+    Authorization: `OSS ${env.OSS_ACCESS_KEY_ID}:${await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, myStringToSign)}`,
+  };
+  let r = await fetch(url, { headers });
+  let xml = await r.text();
   if (!r.ok) {
     const code = (xml.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
-    throw new Error('OSS 列表请求失败：' + code);
+    const ossString = (xml.match(/<StringToSign>([\s\S]*?)<\/StringToSign>/) || [])[1];
+    if (code === 'SignatureDoesNotMatch' && ossString) {
+      const ossStr = xmlUnescape(ossString);
+      headers.Authorization = `OSS ${env.OSS_ACCESS_KEY_ID}:${await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, ossStr)}`;
+      r = await fetch(url, { headers });
+      xml = await r.text();
+      if (!r.ok) {
+        const code2 = (xml.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
+        throw new Error('OSS 列表请求失败：' + code2 + '（已按 OSS 签名串重试仍失败）｜OSS期望[' + ossStr.replace(/\n/g, '⏎') + ']｜我方[' + myStringToSign.replace(/\n/g, '⏎') + ']');
+      }
+    } else {
+      throw new Error('OSS 列表请求失败：' + code);
+    }
   }
   const files = [];
   const re = /<Contents>[\s\S]*?<Key>([\s\S]*?)<\/Key>[\s\S]*?<LastModified>([\s\S]*?)<\/LastModified>[\s\S]*?<Size>(\d+)<\/Size>[\s\S]*?<\/Contents>/g;
   let m;
   while ((m = re.exec(xml)) !== null) {
-    files.push({ key: m[1], time: m[2], size: parseInt(m[3], 10), url: env.PUBLIC_URL_BASE.replace(/\/$/, '') + '/' + m[1] });
+    files.push({ key: xmlUnescape(m[1]), time: m[2], size: parseInt(m[3], 10), url: env.PUBLIC_URL_BASE.replace(/\/$/, '') + '/' + m[1] });
   }
   const nextToken = (xml.match(/<NextContinuationToken>([^<]*)<\/NextContinuationToken>/) || [])[1] || '';
   const truncated = /<IsTruncated>true<\/IsTruncated>/.test(xml);
@@ -87,22 +109,35 @@ async function handleList(request, env) {
   }
 }
 
-// OSS DeleteObject：用 x-oss-date 替代 Date 头
+// OSS DeleteObject：用 x-oss-date 替代 Date 头，自愈重试逻辑同 listObjects
 // StringToSign = DELETE\n\n\n\nx-oss-date:<date>\n/<bucket>/<key>
 async function deleteObject(env, key) {
   const bucket = env.OSS_BUCKET;
   const endpoint = env.OSS_ENDPOINT;
+  const url = `https://${bucket}.${endpoint}/${key.split('/').map(encodeURIComponent).join('/')}`;
   const date = new Date().toUTCString();
-  const stringToSign = 'DELETE\n\n\n\nx-oss-date:' + date + '\n/' + bucket + '/' + key;
-  const signature = await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, stringToSign);
-  const r = await fetch(`https://${bucket}.${endpoint}/${key.split('/').map(encodeURIComponent).join('/')}`, {
-    method: 'DELETE',
-    headers: { 'x-oss-date': date, Authorization: `OSS ${env.OSS_ACCESS_KEY_ID}:${signature}` },
-  });
+  const myStringToSign = 'DELETE\n\n\n\nx-oss-date:' + date + '\n/' + bucket + '/' + key;
+  const headers = {
+    'x-oss-date': date,
+    Authorization: `OSS ${env.OSS_ACCESS_KEY_ID}:${await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, myStringToSign)}`,
+  };
+  let r = await fetch(url, { method: 'DELETE', headers });
   if (!r.ok && r.status !== 204) {
     const xml = await r.text();
     const code = (xml.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
-    throw new Error('OSS 删除失败：' + code);
+    const ossString = (xml.match(/<StringToSign>([\s\S]*?)<\/StringToSign>/) || [])[1];
+    if (code === 'SignatureDoesNotMatch' && ossString) {
+      const ossStr = xmlUnescape(ossString);
+      headers.Authorization = `OSS ${env.OSS_ACCESS_KEY_ID}:${await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, ossStr)}`;
+      r = await fetch(url, { method: 'DELETE', headers });
+      if (!r.ok && r.status !== 204) {
+        const xml2 = await r.text();
+        const code2 = (xml2.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
+        throw new Error('OSS 删除失败：' + code2 + '（已按 OSS 签名串重试仍失败）｜OSS期望[' + ossStr.replace(/\n/g, '⏎') + ']｜我方[' + myStringToSign.replace(/\n/g, '⏎') + ']');
+      }
+    } else {
+      throw new Error('OSS 删除失败：' + code);
+    }
   }
 }
 
