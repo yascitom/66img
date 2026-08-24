@@ -819,8 +819,9 @@
 
   function gridTile(f){
     const t=f.type||fileTypeOf(f.key);
-    if(t==='image') return '<img loading="lazy" src="'+f.url+'" alt="">';
-    if(t==='video') return '<video muted preload="metadata" src="'+f.url+'"></video><div class="badge">🎬 视频</div>';
+    const u=escapeHtml(f.url); // 属性上下文必须转义，防 key 中特殊字符造成属性注入
+    if(t==='image') return '<img loading="lazy" src="'+u+'" alt="">';
+    if(t==='video') return '<video muted preload="metadata" src="'+u+'"></video><div class="badge">🎬 视频</div>';
     return '<div class="ftile"><div class="fico">'+fileIcon(f.key)+'</div><div class="fext">'+escapeHtml((f.key.split('.').pop()||'file').slice(0,6))+'</div></div>';
   }
 
@@ -891,12 +892,13 @@
     lbCurrent=f;
     const t=f.type||fileTypeOf(f.key);
     const name=f.key.split('/').pop();
+    const u=escapeHtml(f.url);
     if(t==='image'){
-      lbMedia.innerHTML='<img src="'+f.url+'" alt="">';
+      lbMedia.innerHTML='<img src="'+u+'" alt="">';
       $('lbCopyMd').style.display='';
       $('lbOpen').style.display='none';
     }else if(t==='video'){
-      lbMedia.innerHTML='<video controls playsinline src="'+f.url+'"></video>';
+      lbMedia.innerHTML='<video controls playsinline src="'+u+'"></video>';
       $('lbCopyMd').style.display='none';
       $('lbOpen').style.display='none';
     }else{
@@ -966,7 +968,7 @@
       const d=document.createElement('div');
       d.className='gitem';
       const t=fileTypeOf(it.url.split('?')[0]);
-      if(t==='image') d.innerHTML='<img loading="lazy" src="'+it.url+'">';
+      if(t==='image') d.innerHTML='<img loading="lazy" src="'+escapeHtml(it.url)+'">';
       else if(t==='video') d.innerHTML='<div class="ftile"><div class="fico">🎬</div><div class="fext">video</div></div>';
       else d.innerHTML='<div class="ftile"><div class="fico">'+fileIcon(it.url)+'</div><div class="fext">'+escapeHtml((it.url.split('.').pop()||'file').slice(0,6))+'</div></div>';
       d.innerHTML+='<div class="mask"><span>点击复制链接</span></div>';
