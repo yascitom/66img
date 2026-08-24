@@ -74,6 +74,28 @@ async function deleteObject(env, key) {
   }
 }
 
+// 密码校验：SHA-256 哈希后比对；失败统一延迟 ~0.4s，拖慢在线暴力破解
+async function pwdOk(input, expected) {
+  if (!expected) return true;
+  const enc = new TextEncoder();
+  async function h(s) {
+    const d = await crypto.subtle.digest('SHA-256', enc.encode(String(s == null ? '' : s)));
+    return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+  return (await h(input)) === (await h(expected));
+}
+
+async function rejectAuth() {
+  await new Promise(r => setTimeout(r, 400));
+  return jsonResponse({ error: '上传密码错误' }, 401);
+}
+
+// key 白名单：upweb/ 前缀 + 安全字符集（字母数字 . _ - /），禁 .. 与可注入字符
+const KEY_RE = /^upweb\/[A-Za-z0-9._\/-]+$/;
+function validKey(key) {
+  return typeof key === 'string' && key.length <= 512 && KEY_RE.test(key) && !key.includes('..');
+}
+
 async function handle(request, env) {
   if (request.method !== 'POST') {
     return jsonResponse({ error: 'Method Not Allowed' }, 405);
@@ -91,12 +113,12 @@ async function handle(request, env) {
     return jsonResponse({ error: '请求体必须是 JSON' }, 400);
   }
 
-  if (env.UPLOAD_PASSWORD && body.password !== env.UPLOAD_PASSWORD) {
-    return jsonResponse({ error: '上传密码错误' }, 401);
+  if (!(await pwdOk(body.password, env.UPLOAD_PASSWORD))) {
+    return rejectAuth();
   }
 
   const key = String(body.key || '');
-  if (!key.startsWith('upweb/') || key.includes('..')) {
+  if (!validKey(key)) {
     return jsonResponse({ error: '仅允许删除 upweb/ 前缀下的文件' }, 400);
   }
 
