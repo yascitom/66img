@@ -293,7 +293,7 @@
   <div class="lockbox" id="lockbox">
     <div class="lockicon">🔒</div>
     <h2>云窝</h2>
-    <p>私有图床 · 小型网盘 · 请输入访问密码<br>密码由服务端 UPLOAD_PASSWORD 环境变量决定</p>
+    <p>私有图床 · 小型网盘 · 请输入访问密码<br>登录有效期 7 天，到期需重新输入密码</p>
     <input type="password" id="lockInput" placeholder="访问密码" autocomplete="current-password">
     <button id="lockBtn">进 入</button>
     <div class="lockerr" id="lockErr"></div>
@@ -504,9 +504,14 @@
       return;
     }
     if(r.ok){
-      if(r.token) saveToken(r.token);       // 新版服务端：保存 7 天令牌，明文密码即弃
-      else if(password) localStorage.setItem(PWD_KEY,password); // 旧版服务端兼容回退
-      lockErr.textContent=''; unlock(r.maxMB);
+      if(r.token){
+        saveToken(r.token);               // 保存 7 天令牌，明文密码即弃（7 天硬到期，不续期）
+        lockErr.textContent=''; unlock(r.maxMB);
+      }else{
+        // 服务端未签发令牌 = 后端版本过旧，拒绝降级为本地保存明文密码
+        lockErr.textContent='服务端未签发登录令牌，请将后端函数更新到最新版本';
+        lockbox.classList.remove('shake'); void lockbox.offsetWidth; lockbox.classList.add('shake');
+      }
     }
     else{
       if(fromAuto){ localStorage.removeItem(PWD_KEY); lockScreen.classList.remove('hidden'); lockErr.textContent=r.msg; }
@@ -966,7 +971,7 @@
   window.addEventListener('keydown',e=>{ if(e.key==='Escape') closeLightbox(); });
   $('lbCopy').addEventListener('click',()=>{ if(lbCurrent){ navigator.clipboard.writeText(lbCurrent.url); toast('链接已复制','ok'); } });
   $('lbCopyMd').addEventListener('click',()=>{ if(lbCurrent){ navigator.clipboard.writeText('![img]('+lbCurrent.url+')'); toast('Markdown 已复制','ok'); } });
-  $('lbOpen').addEventListener('click',()=>{ if(lbCurrent) window.open(lbCurrent.url,'_blank'); });
+  $('lbOpen').addEventListener('click',()=>{ if(lbCurrent) window.open(lbCurrent.url,'_blank','noopener,noreferrer'); });
 
   function resetDeleteBtn(){
     const b=$('lbDelete');
