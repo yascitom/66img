@@ -1,12 +1,12 @@
 // ============================================================
 // OSS 直传签名 —— 阿里云 ESA 边缘函数（Edge Routine）版
-// 路由：POST /api/sign
+// 路由：POST /api/sign、POST /api/list、POST /api/delete、POST /api/multipart（大文件分片上传）
 // 部署：ESA 控制台 → 边缘函数 → 新建函数 → 粘贴本文件 → 发布 →
 //       在「函数路由/域名关联」中把你的管理站点域名关联到本函数
 // 注意：ESA 边缘函数若不支持控制台环境变量，直接在下方 CONFIG 里填写即可
 //       （填了 CONFIG 的代码文件不要再提交到公开仓库！）
 // 前端 index.html 可部署在 ESA Pages 或任何静态托管上，
-// 本函数已放开 /api/sign 的 CORS。
+// 本函数已放开 /api/* 的 CORS。
 // ============================================================
 
 // 如果 ESA 没有配环境变量的入口，就在这里直接填（优先级高于环境变量）：
@@ -18,6 +18,7 @@ const CONFIG = {
   PUBLIC_URL_BASE: '',    // 如 https://img.example.com（你的 CF 免流域名）
   UPLOAD_PASSWORD: '',    // 可选，留空表示不需要上传密码
   MAX_SIZE_MB: '',        // 可选，默认 100
+  PART_SIZE_MB: '',       // 可选，分片大小（MB），默认 10，范围 5~100
 };
 
 const CORS = {
@@ -252,13 +253,159 @@ async function handleSign(request) {
   });
 }
 
+// ================= 分片上传（Multipart Upload） =================
+// action=init      服务端调 InitiateMultipartUpload，返回 uploadId + key
+// action=part      为单个分片签发预签名 URL（1 小时有效），浏览器直传 OSS
+// action=complete  合并分片；action=abort 清理残留分片
+// 每个分片即签即传、独立计时 → 慢网络总时长不设限，且支持断点续传。
+
+function xmlEscape(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+function validMpKey(key) {
+  return typeof key === 'string' && key.startsWith('upweb/') && !key.includes('..');
+}
+function encodeKeyPath(key) {
+  return key.split('/').map(encodeURIComponent).join('/');
+}
+
+// 服务端签名直调 OSS（init/complete/abort），V1 Header 签名 + 签名自愈重试
+async function ossRequest(method, key, subResource, contentType, bodyText) {
+  const bucket = getEnv('OSS_BUCKET');
+  const endpoint = getEnv('OSS_ENDPOINT');
+  const url = `https://${bucket}.${endpoint}/${encodeKeyPath(key)}${subResource}`;
+  const date = new Date().toUTCString();
+  const canonicalizedResource = `/${bucket}/${key}${subResource}`;
+  const myStringToSign = `${method}\n\n${contentType || ''}\n\nx-oss-date:${date}\n${canonicalizedResource}`;
+  const headers = {
+    'x-oss-date': date,
+    Authorization: `OSS ${getEnv('OSS_ACCESS_KEY_ID')}:${await hmacSha1Base64(getEnv('OSS_ACCESS_KEY_SECRET'), myStringToSign)}`,
+  };
+  if (contentType) headers['Content-Type'] = contentType;
+  let r = await fetch(url, { method, headers, body: bodyText || undefined });
+  let xml = await r.text();
+  if (!r.ok) {
+    const code = (xml.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
+    const ossString = (xml.match(/<StringToSign>([\s\S]*?)<\/StringToSign>/) || [])[1];
+    if (code === 'SignatureDoesNotMatch' && ossString) {
+      const ossStr = xmlUnescape(ossString);
+      headers.Authorization = `OSS ${getEnv('OSS_ACCESS_KEY_ID')}:${await hmacSha1Base64(getEnv('OSS_ACCESS_KEY_SECRET'), ossStr)}`;
+      r = await fetch(url, { method, headers, body: bodyText || undefined });
+      xml = await r.text();
+      if (!r.ok) {
+        const code2 = (xml.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
+        throw new Error(`OSS ${method} 请求失败：` + code2 + '（已按 OSS 签名串重试仍失败）｜OSS期望[' + ossStr.replace(/\n/g, '⏎') + ']｜我方[' + myStringToSign.replace(/\n/g, '⏎') + ']');
+      }
+    } else {
+      throw new Error(`OSS ${method} 请求失败：` + code);
+    }
+  }
+  return xml;
+}
+
+// 为单个分片签发预签名 URL（V1 URL 签名）
+// StringToSign = PUT\n\n{Content-Type}\n{Expires}\n/{bucket}/{key}?partNumber={n}&uploadId={id}
+async function signPartUrl(key, uploadId, partNumber, mime) {
+  const bucket = getEnv('OSS_BUCKET');
+  const expires = Math.floor(Date.now() / 1000) + 3600;
+  const stringToSign = `PUT\n\n${mime}\n${expires}\n/${bucket}/${key}?partNumber=${partNumber}&uploadId=${uploadId}`;
+  const signature = await hmacSha1Base64(getEnv('OSS_ACCESS_KEY_SECRET'), stringToSign);
+  return `https://${bucket}.${getEnv('OSS_ENDPOINT')}/${encodeKeyPath(key)}`
+    + `?partNumber=${partNumber}&uploadId=${encodeURIComponent(uploadId)}`
+    + `&OSSAccessKeyId=${encodeURIComponent(getEnv('OSS_ACCESS_KEY_ID'))}`
+    + `&Expires=${expires}&Signature=${encodeURIComponent(signature)}`;
+}
+
+async function handleMultipart(request) {
+  const required = ['OSS_ACCESS_KEY_ID', 'OSS_ACCESS_KEY_SECRET', 'OSS_BUCKET', 'OSS_ENDPOINT', 'PUBLIC_URL_BASE'];
+  for (const k of required) {
+    if (!getEnv(k)) return jsonResponse({ error: `服务端缺少配置 ${k}` }, 500);
+  }
+  let body;
+  try { body = await request.json(); } catch { return jsonResponse({ error: '请求体必须是 JSON' }, 400); }
+  const pwd = getEnv('UPLOAD_PASSWORD');
+  if (pwd && body.password !== pwd) {
+    return jsonResponse({ error: '上传密码错误' }, 401);
+  }
+
+  const maxMB = parseInt(getEnv('MAX_SIZE_MB'), 10) || 100;
+  const maxSize = maxMB * 1024 * 1024;
+  let partMB = parseInt(getEnv('PART_SIZE_MB'), 10) || 10;
+  if (partMB < 5) partMB = 5;
+  if (partMB > 100) partMB = 100;
+  const partSize = partMB * 1024 * 1024;
+  const action = String(body.action || '');
+
+  try {
+    if (action === 'init') {
+      const size = parseInt(body.size, 10) || 0;
+      if (size <= 0 || size > maxSize) {
+        return jsonResponse({ error: `文件大小超限（上限 ${maxMB}MB）` }, 400);
+      }
+      const mime = String(body.mime || 'application/octet-stream').slice(0, 100) || 'application/octet-stream';
+      const key = makeObjectKey(body.filename || 'file.bin');
+      const xml = await ossRequest('POST', key, '?uploads', mime, null);
+      const uploadId = (xml.match(/<UploadId>([^<]+)<\/UploadId>/) || [])[1];
+      if (!uploadId) throw new Error('OSS 未返回 UploadId');
+      return jsonResponse({ key, uploadId, partSize, dir: key.split('/').slice(0, 2).join('/') });
+    }
+
+    if (action === 'part') {
+      const key = String(body.key || '');
+      const uploadId = String(body.uploadId || '');
+      const partNumber = parseInt(body.partNumber, 10);
+      if (!validMpKey(key) || !uploadId) return jsonResponse({ error: '参数非法' }, 400);
+      if (!Number.isInteger(partNumber) || partNumber < 1 || partNumber > 10000) {
+        return jsonResponse({ error: 'partNumber 须在 1~10000 之间' }, 400);
+      }
+      const mime = String(body.mime || 'application/octet-stream').slice(0, 100) || 'application/octet-stream';
+      return jsonResponse({ url: await signPartUrl(key, uploadId, partNumber, mime), expiresIn: 3600 });
+    }
+
+    if (action === 'complete') {
+      const key = String(body.key || '');
+      const uploadId = String(body.uploadId || '');
+      const parts = Array.isArray(body.parts) ? body.parts : [];
+      if (!validMpKey(key) || !uploadId || parts.length === 0 || parts.length > 10000) {
+        return jsonResponse({ error: '参数非法' }, 400);
+      }
+      let xmlBody = '<CompleteMultipartUpload>';
+      for (const p of parts) {
+        const n = parseInt(p.partNumber, 10);
+        const etag = String(p.etag || '').replace(/"/g, '');
+        if (!Number.isInteger(n) || n < 1 || n > 10000 || !etag) {
+          return jsonResponse({ error: '分片列表参数非法' }, 400);
+        }
+        xmlBody += `<Part><PartNumber>${n}</PartNumber><ETag>"${xmlEscape(etag)}"</ETag></Part>`;
+      }
+      xmlBody += '</CompleteMultipartUpload>';
+      await ossRequest('POST', key, `?uploadId=${encodeURIComponent(uploadId)}`, 'application/xml', xmlBody);
+      return jsonResponse({ ok: true, key, url: `${getEnv('PUBLIC_URL_BASE').replace(/\/$/, '')}/${key}`, dir: key.split('/').slice(0, 2).join('/') });
+    }
+
+    if (action === 'abort') {
+      const key = String(body.key || '');
+      const uploadId = String(body.uploadId || '');
+      if (!validMpKey(key) || !uploadId) return jsonResponse({ error: '参数非法' }, 400);
+      await ossRequest('DELETE', key, `?uploadId=${encodeURIComponent(uploadId)}`, '', null);
+      return jsonResponse({ ok: true });
+    }
+
+    return jsonResponse({ error: '未知 action（支持 init/part/complete/abort）' }, 400);
+  } catch (e) {
+    return jsonResponse({ error: e.message }, 502);
+  }
+}
+
 async function handleRequest(request) {
   const url = new URL(request.url);
   if (request.method === 'OPTIONS') return new Response(null, { headers: CORS });
   if (url.pathname === '/api/sign' && request.method === 'POST') return handleSign(request);
   if (url.pathname === '/api/list' && request.method === 'POST') return handleList(request);
   if (url.pathname === '/api/delete' && request.method === 'POST') return handleDelete(request);
-  return jsonResponse({ error: 'Not Found. 接口：POST /api/sign、POST /api/list、POST /api/delete。' }, 404);
+  if (url.pathname === '/api/multipart' && request.method === 'POST') return handleMultipart(request);
+  return jsonResponse({ error: 'Not Found. 接口：POST /api/sign、POST /api/list、POST /api/delete、POST /api/multipart。' }, 404);
 }
 
 // ESA 边缘函数入口（Service Worker 风格）
