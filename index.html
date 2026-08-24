@@ -390,7 +390,7 @@
   const lockScreen=$('lockScreen'), lockbox=$('lockbox'), lockInput=$('lockInput'), lockBtn=$('lockBtn'), lockErr=$('lockErr');
   const mainApp=$('mainApp');
   const lightbox=$('lightbox'), lbMedia=$('lbMedia'), lbMeta=$('lbMeta');
-  const HIST_KEY='yunwo_history', PWD_KEY='yunwo_pwd', MP_KEY='yunwo_multipart_tasks';
+  const HIST_KEY='yunwo_history', PWD_KEY='yunwo_pwd', MP_KEY='yunwo_multipart_tasks', TOKEN_KEY='yunwo_token';
   // 旧版（云汀云盘）本地数据一次性迁移：老用户的登录态、历史记录、分片续传进度不丢
   (function migrateLegacyKeys(){
     const pairs=[['oss_imgbed_history',HIST_KEY],['oss_imgbed_pwd',PWD_KEY],['yt_multipart_tasks',MP_KEY]];
@@ -438,19 +438,41 @@
     setTimeout(()=>{ t.classList.add('out'); setTimeout(()=>t.remove(),350); }, 2200);
   }
 
-  // ================= 登录门禁 =================
-  function getPwd(){ return localStorage.getItem(PWD_KEY)||''; }
+  // ================= 登录门禁（令牌制：明文密码只用于首次验证，之后本地只存 7 天令牌） =================
+  function getToken(){
+    try{
+      const o=JSON.parse(localStorage.getItem(TOKEN_KEY)||'null');
+      // 提前 60 秒视为过期，避免请求在途中过期
+      if(o && o.t && o.e && o.e > Math.floor(Date.now()/1000)+60) return o.t;
+    }catch(e){}
+    return '';
+  }
+  function saveToken(t){
+    try{
+      const body=t.slice(0, t.lastIndexOf('.'));
+      const p=JSON.parse(atob(body.replace(/-/g,'+').replace(/_/g,'/')));
+      localStorage.setItem(TOKEN_KEY, JSON.stringify({t:t, e:p.e||0}));
+    }catch(e){ /* 令牌格式异常则不保存 */ }
+    localStorage.removeItem(PWD_KEY); // 拿到令牌后不再保存明文密码
+  }
+  function authFields(){ const t=getToken(); return t?{auth:t}:{}; }
+  function authExpired(){
+    localStorage.removeItem(TOKEN_KEY);
+    lockInput.value=''; lockErr.textContent='登录已过期，请重新输入密码';
+    lockScreen.classList.remove('hidden'); mainApp.classList.remove('unlocked');
+  }
 
-  async function checkPassword(password){
+  // 身份预检：payload 为 {password}（登录）或 {auth}（令牌续期）
+  async function checkAuth(payload){
     try{
       const r=await fetch('/api/sign',{
         method:'POST', headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({check:true, password:password})
+        body:JSON.stringify(Object.assign({check:true}, payload))
       });
       if(r.status===404) return {preview:true};
       const data=await r.json().catch(()=>({}));
-      if(r.ok) return {ok:true, maxMB:data.maxMB};
-      if(r.status===401) return {ok:false, msg:data.error||'密码错误'};
+      if(r.ok) return {ok:true, maxMB:data.maxMB, token:data.token};
+      if(r.status===401) return {ok:false, expired:true, msg:data.error||'密码错误或会话已过期'};
       return {ok:false, msg:data.error||('服务端错误 '+r.status)};
     }catch(e){ return {preview:true}; }
   }
@@ -471,7 +493,7 @@
 
   async function tryUnlock(password, fromAuto){
     lockBtn.disabled=true;
-    const r=await checkPassword(password);
+    const r=await checkAuth({password:password});
     lockBtn.disabled=false;
     if(r.preview){
       if(password===DEMO_PASSWORD){ unlock(); showPreviewBanner(); }
@@ -481,20 +503,37 @@
       }
       return;
     }
-    if(r.ok){ localStorage.setItem(PWD_KEY,password); lockErr.textContent=''; unlock(r.maxMB); }
+    if(r.ok){
+      if(r.token) saveToken(r.token);       // 新版服务端：保存 7 天令牌，明文密码即弃
+      else if(password) localStorage.setItem(PWD_KEY,password); // 旧版服务端兼容回退
+      lockErr.textContent=''; unlock(r.maxMB);
+    }
     else{
       if(fromAuto){ localStorage.removeItem(PWD_KEY); lockScreen.classList.remove('hidden'); lockErr.textContent=r.msg; }
       else{ lockErr.textContent=r.msg; lockbox.classList.remove('shake'); void lockbox.offsetWidth; lockbox.classList.add('shake'); }
     }
   }
 
+  // 已存令牌的自动登录：令牌有效则直接解锁并换新，失效则清除回锁屏
+  async function tryTokenLogin(token){
+    const r=await checkAuth({auth:token});
+    if(r.ok){ if(r.token) saveToken(r.token); unlock(r.maxMB); return; }
+    if(r.preview){ unlock(); showPreviewBanner(); return; }
+    localStorage.removeItem(TOKEN_KEY);
+    lockErr.textContent=r.expired?'登录已过期，请重新输入密码':r.msg;
+    lockScreen.classList.remove('hidden');
+  }
+
   lockBtn.addEventListener('click',()=>tryUnlock(lockInput.value,false));
   lockInput.addEventListener('keydown',e=>{ if(e.key==='Enter') tryUnlock(lockInput.value,false); });
   $('logoutBtn').addEventListener('click',()=>{
-    localStorage.removeItem(PWD_KEY); lockInput.value=''; lockErr.textContent='';
+    localStorage.removeItem(TOKEN_KEY); localStorage.removeItem(PWD_KEY);
+    lockInput.value=''; lockErr.textContent='';
     lockScreen.classList.remove('hidden'); mainApp.classList.remove('unlocked');
   });
-  tryUnlock(getPwd(), true);
+  // 自动登录：优先用已存令牌；旧版明文密码自动验证一次并迁移为令牌
+  if(getToken()) tryTokenLogin(getToken());
+  else tryUnlock(localStorage.getItem(PWD_KEY)||'', true);
 
   quality.addEventListener('input',()=>qualityVal.textContent=quality.value);
 
@@ -607,10 +646,11 @@
   async function getSign(file){
     const sr=await fetch('/api/sign',{
       method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({filename:file.name, size:file.size, password:getPwd()})
+      body:JSON.stringify(Object.assign({filename:file.name, size:file.size}, authFields()))
     });
     if(sr.status===404) throw new Error('预览模式无后端');
-    const sign=await sr.json();
+    const sign=await sr.json().catch(()=>({}));
+    if(sr.status===401){ authExpired(); throw new Error('登录已过期，请重新输入密码'); }
     if(!sr.ok) throw new Error(sign.error||('签名失败 '+sr.status));
     return sign;
   }
@@ -650,11 +690,16 @@
   async function mpApi(payload){
     const r=await fetch('/api/multipart',{
       method:'POST', headers:{'Content-Type':'application/json'},
-      body:JSON.stringify(Object.assign({password:getPwd()}, payload))
+      body:JSON.stringify(Object.assign({}, payload, authFields()))
     });
     if(r.status===404) throw new Error('预览模式无后端');
     const data=await r.json().catch(()=>({}));
-    if(!r.ok) throw new Error(data.error||('分片服务错误 '+r.status));
+    if(r.status===401){ authExpired(); throw new Error('登录已过期，请重新输入密码'); }
+    if(!r.ok){
+      const err=new Error(data.error||('分片服务错误 '+r.status));
+      if(data.code) err.code=data.code; // 如 BAD_SESSION：会话令牌失效，交给外层整体重启
+      throw err;
+    }
     return data;
   }
 
@@ -738,13 +783,13 @@
     let lastErr=null;
     for(let attempt=1; attempt<=3; attempt++){
       try{
-        const sign=await mpApi({action:'part', key:task.key, uploadId:task.uploadId, partNumber:n, mime:task.mime});
+        const sign=await mpApi({action:'part', key:task.key, uploadId:task.uploadId, partNumber:n, mime:task.mime, session:task.session||''});
         const etag=await xhrPut(sign.url, chunk, task.mime, md5, onProgress);
         if(!etag) throw new Error('ETag 为空');
         return etag;
       }catch(e){
         lastErr=e;
-        if(e.code==='NoSuchUpload') throw e; // 会话已失效：不重试，交给外层整体重启
+        if(e.code==='NoSuchUpload'||e.code==='BAD_SESSION') throw e; // 会话已失效：不重试，交给外层整体重启
         if(attempt<3) await new Promise(r=>setTimeout(r, 1500*attempt));
       }
     }
@@ -761,7 +806,7 @@
         if(!resumed){
           setQ(item, 10, '初始化分片上传…');
           const init=await mpApi({action:'init', filename:file.name, size:file.size, mime:file.type||'application/octet-stream'});
-          task={key:init.key, uploadId:init.uploadId, partSize:init.partSize, dir:init.dir, mime:file.type||'application/octet-stream', parts:{}};
+          task={key:init.key, uploadId:init.uploadId, partSize:init.partSize, session:init.session||'', dir:init.dir, mime:file.type||'application/octet-stream', parts:{}};
           saveMpTask(fp, task);
         }else{
           task=saved;
@@ -787,12 +832,12 @@
 
         setQ(item, 97, '合并分片…');
         const parts=Object.keys(task.parts).map(k=>({partNumber:+k, etag:task.parts[k]})).sort((a,b)=>a.partNumber-b.partNumber);
-        const done=await mpApi({action:'complete', key:task.key, uploadId:task.uploadId, parts});
+        const done=await mpApi({action:'complete', key:task.key, uploadId:task.uploadId, session:task.session||'', parts});
         delMpTask(fp);
         return {url:done.url, dir:done.dir, key:done.key};
       }catch(e){
-        if(e.code==='NoSuchUpload' && restarted===0){
-          // OSS 侧会话已失效（如超时 7 天被清理）：清掉本地进度，自动重来一次
+        if((e.code==='NoSuchUpload'||e.code==='BAD_SESSION') && restarted===0){
+          // OSS 侧会话或本地令牌已失效（如超时 7 天被清理）：清掉本地进度，自动重来一次
           delMpTask(fp);
           setQ(item, 10, '续传会话已过期，自动重新开始…');
           continue;
@@ -860,7 +905,7 @@
     try{
       const r=await fetch('/api/list',{
         method:'POST', headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({password:getPwd(), token:append?cloudToken:'', dir:curDir})
+        body:JSON.stringify(Object.assign({token:append?cloudToken:'', dir:curDir}, authFields()))
       });
       if(r.status===404){
         list.innerHTML='';
@@ -868,6 +913,7 @@
         hint.textContent='静态预览模式：云端文件需部署后使用';
         return;
       }
+      if(r.status===401){ authExpired(); return; }
       const data=await r.json();
       if(!r.ok) throw new Error(data.error||('服务端错误 '+r.status));
       cloudItems=cloudItems.concat(data.files||[]);
@@ -938,9 +984,10 @@
     try{
       const r=await fetch('/api/delete',{
         method:'POST', headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({password:getPwd(), key:lbCurrent.key})
+        body:JSON.stringify(Object.assign({key:lbCurrent.key}, authFields()))
       });
       const data=await r.json().catch(()=>({}));
+      if(r.status===401){ authExpired(); throw new Error('登录已过期，请重新输入密码'); }
       if(!r.ok) throw new Error(data.error||('删除失败 '+r.status));
       cloudItems=cloudItems.filter(x=>x.key!==lbCurrent.key);
       renderCloud($('cloudSearch').value);
