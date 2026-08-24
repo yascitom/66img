@@ -35,6 +35,22 @@ async function hmacSha1Base64(secret, message) {
   return btoa(String.fromCharCode(...new Uint8Array(sig)));
 }
 
+// 密码校验：SHA-256 哈希后比对；失败统一延迟 ~0.4s，拖慢在线暴力破解
+async function pwdOk(input, expected) {
+  if (!expected) return true;
+  const enc = new TextEncoder();
+  async function h(s) {
+    const d = await crypto.subtle.digest('SHA-256', enc.encode(String(s == null ? '' : s)));
+    return [...new Uint8Array(d)].map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+  return (await h(input)) === (await h(expected));
+}
+
+async function rejectAuth() {
+  await new Promise(r => setTimeout(r, 400));
+  return jsonResponse({ error: '上传密码错误' }, 401);
+}
+
 const IMG_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'avif', 'bmp', 'ico', 'tiff'];
 const VIDEO_EXTS = ['mp4', 'webm', 'mov', 'mkv', 'm4v', 'avi', 'flv', 'ts'];
 
@@ -72,15 +88,15 @@ async function handle(request, env) {
 
   // 密码预检：前端登录门禁专用，只验密码、不生成签名（顺带返回大小上限给前端展示）
   if (body.check === true) {
-    if (env.UPLOAD_PASSWORD && body.password !== env.UPLOAD_PASSWORD) {
-      return jsonResponse({ error: '上传密码错误' }, 401);
+    if (!(await pwdOk(body.password, env.UPLOAD_PASSWORD))) {
+      return rejectAuth();
     }
     return jsonResponse({ ok: true, needPassword: !!env.UPLOAD_PASSWORD, maxMB });
   }
 
   // 上传密码校验（如设置了 UPLOAD_PASSWORD）
-  if (env.UPLOAD_PASSWORD && body.password !== env.UPLOAD_PASSWORD) {
-    return jsonResponse({ error: '上传密码错误' }, 401);
+  if (!(await pwdOk(body.password, env.UPLOAD_PASSWORD))) {
+    return rejectAuth();
   }
 
   const size = parseInt(body.size, 10) || 0;
