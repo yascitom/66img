@@ -13,7 +13,8 @@
 //   OSS_BUCKET             Bucket 名称，如 my-img
 //   OSS_ENDPOINT           Bucket 地域节点，如 oss-cn-hongkong.aliyuncs.com
 //   PUBLIC_URL_BASE        文件访问域名（CF 免流域名），如 https://img.example.com
-//   UPLOAD_PASSWORD        （可选）上传密码，设置后前端必须填对才能拿签名
+//   UPLOAD_PASSWORD        上传密码（必填，≥10 位）；未配置或太短将拒绝服务
+//   ALLOW_ANONYMOUS_UPLOAD （可选）显式设为 true 才允许免密码公开上传（不推荐）
 //   MAX_SIZE_MB            （可选）单文件上限，默认 100（视频建议放大）
 // ============================================================
 
@@ -48,7 +49,70 @@ async function pwdOk(input, expected) {
 
 async function rejectAuth() {
   await new Promise(r => setTimeout(r, 400));
-  return jsonResponse({ error: '上传密码错误' }, 401);
+  return jsonResponse({ error: '上传密码错误或会话已过期' }, 401);
+}
+
+// ============================================================
+// 鉴权配置（fail-closed）与 HMAC 会话令牌
+// ============================================================
+// 配置检查：未设密码且未显式允许匿名 → 拒绝服务；密码 < 10 位 → 拒绝服务。
+// 返回 '' 表示配置可用，否则返回给前端的错误说明。
+function authConfigError(env) {
+  const p = env.UPLOAD_PASSWORD;
+  if (!p) {
+    if (String(env.ALLOW_ANONYMOUS_UPLOAD || '') === 'true') return '';
+    return '服务端未配置 UPLOAD_PASSWORD，已拒绝服务。请在平台环境变量中设置上传密码（≥10 位）；如确需完全公开，显式设置 ALLOW_ANONYMOUS_UPLOAD=true';
+  }
+  if (String(p).length < 10) {
+    return 'UPLOAD_PASSWORD 强度不足（至少需 10 位），已拒绝服务。请在平台环境变量中修改为强密码';
+  }
+  return '';
+}
+
+// base64url 编解码（payload 均为 ASCII，可直接 btoa/atob）
+function b64urlEncode(s) { return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
+function b64urlDecode(s) { return atob(s.replace(/-/g, '+').replace(/_/g, '/')); }
+
+// HMAC-SHA256 → base64url（Web Crypto）
+async function hmacSha256B64url(secret, message) {
+  const enc = new TextEncoder();
+  const key = await crypto.subtle.importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const sig = await crypto.subtle.sign('HMAC', key, enc.encode(message));
+  return b64urlEncode(String.fromCharCode(...new Uint8Array(sig)));
+}
+
+// 签发令牌：base64url(payload JSON) + '.' + 签名；密钥用 OSS SK，不新增环境变量
+async function makeToken(payload, secret) {
+  const body = b64urlEncode(JSON.stringify(payload));
+  return body + '.' + (await hmacSha256B64url(secret, body));
+}
+
+// 校验令牌签名与有效期，返回 payload 或 null
+async function readToken(token, secret) {
+  if (typeof token !== 'string') return null;
+  const i = token.lastIndexOf('.');
+  if (i <= 0) return null;
+  const body = token.slice(0, i);
+  if ((await hmacSha256B64url(secret, body)) !== token.slice(i + 1)) return null;
+  try {
+    const p = JSON.parse(b64urlDecode(body));
+    if (!p || typeof p.e !== 'number' || p.e < Math.floor(Date.now() / 1000)) return null;
+    return p;
+  } catch { return null; }
+}
+
+// 登录会话令牌（7 天）：代替前端长期保存明文密码
+const AUTH_TOKEN_TTL = 7 * 24 * 3600;
+async function makeAuthToken(env) {
+  return makeToken({ t: 'auth', e: Math.floor(Date.now() / 1000) + AUTH_TOKEN_TTL }, env.OSS_ACCESS_KEY_SECRET);
+}
+
+// 统一鉴权：密码 或 登录令牌（body.auth）任一通过即可（匿名模式下密码为空恒通过）
+// 注意：令牌字段名用 auth，避免与 list.js 的分页游标 token 冲突
+async function verifyAuth(body, env) {
+  if (await pwdOk(body.password, env.UPLOAD_PASSWORD)) return true;
+  const p = await readToken(body.auth, env.OSS_ACCESS_KEY_SECRET);
+  return !!(p && p.t === 'auth');
 }
 
 const IMG_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'avif', 'bmp', 'ico', 'tiff'];
@@ -76,6 +140,10 @@ async function handle(request, env) {
     if (!env[k]) return jsonResponse({ error: `服务端缺少环境变量 ${k}` }, 500);
   }
 
+  // 鉴权配置检查（fail-closed）：密码未配 / 弱密码 → 拒绝服务
+  const cfgErr = authConfigError(env);
+  if (cfgErr) return jsonResponse({ error: cfgErr }, 500);
+
   let body;
   try {
     body = await request.json();
@@ -86,16 +154,17 @@ async function handle(request, env) {
   const maxMB = parseInt(env.MAX_SIZE_MB, 10) || 100;
   const maxSize = maxMB * 1024 * 1024;
 
-  // 密码预检：前端登录门禁专用，只验密码、不生成签名（顺带返回大小上限给前端展示）
+  // 密码预检：前端登录门禁专用，只验证身份、不生成签名。
+  // 通过后签发 7 天登录令牌，前端此后不再保存明文密码。
   if (body.check === true) {
-    if (!(await pwdOk(body.password, env.UPLOAD_PASSWORD))) {
+    if (!(await verifyAuth(body, env))) {
       return rejectAuth();
     }
-    return jsonResponse({ ok: true, needPassword: !!env.UPLOAD_PASSWORD, maxMB });
+    return jsonResponse({ ok: true, needPassword: !!env.UPLOAD_PASSWORD, maxMB, token: await makeAuthToken(env) });
   }
 
-  // 上传密码校验（如设置了 UPLOAD_PASSWORD）
-  if (!(await pwdOk(body.password, env.UPLOAD_PASSWORD))) {
+  // 上传鉴权（密码或登录令牌）
+  if (!(await verifyAuth(body, env))) {
     return rejectAuth();
   }
 
@@ -106,12 +175,12 @@ async function handle(request, env) {
 
   const objectKey = makeObjectKey(body.filename || 'file.bin');
 
-  // PostObject Policy：10 分钟有效（大文件上传耗时更长），限制大小和 key 前缀
+  // PostObject Policy：10 分钟有效，大小受限，key 精确绑定本次生成的对象键（不可改写到其他路径）
   const policyObj = {
     expiration: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
     conditions: [
       ['content-length-range', 1, maxSize],
-      ['starts-with', '$key', 'upweb/'],
+      ['eq', '$key', objectKey],
     ],
   };
   const policy = btoa(JSON.stringify(policyObj));
@@ -125,6 +194,7 @@ async function handle(request, env) {
       OSSAccessKeyId: env.OSS_ACCESS_KEY_ID,
       success_action_status: '200',
       signature,
+      'x-oss-forbid-overwrite': 'true', // 双保险：禁止覆盖同名对象
     },
     url: `${env.PUBLIC_URL_BASE.replace(/\/$/, '')}/${objectKey}`,
     dir: objectKey.split('/').slice(0, 2).join('/'), // 如 upweb/img
