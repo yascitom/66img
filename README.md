@@ -2,7 +2,7 @@
 
 私有图床 + 小型网盘：配合「阿里云 OSS → Cloudflare 免流」教程使用，界面优雅、功能完整：
 
-> 📖 配套教程：[奈溪论坛 · 阿里云 OSS + Cloudflare 免流图床教程](https://forum.naixi.net/thread-9085-1-1.html) ｜ [NodeSeek · 同教程帖子](https://www.nodeseek.com/post-586574-1)
+> 📖 配套教程：[奶昔论坛 · 阿里云 OSS + Cloudflare 免流图床教程](https://forum.naixi.net/thread-9085-1-1.html) ｜ [NodeSeek · 同教程帖子](https://www.nodeseek.com/post-586574-1)
 
 - **存储**：阿里云 OSS 私有桶（海外地域，如香港）
 - **分发**：Cloudflare 免流域名（你的 `2.com`），文件访问不经过任何函数，无限流量
