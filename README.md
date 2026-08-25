@@ -37,14 +37,16 @@
 
 ```
 ├── index.html                    # 前端页面（登录门禁/分片上传/断点续传/云端文件/灯箱/历史记录）
+├── favicon.png                   # 站点图标
 ├── functions/api/
 │   ├── sign.js                   # 小文件上传签名 + 密码预检（EdgeOne Pages / CF Pages 直接用）
 │   ├── list.js                   # 列出桶内文件（支持目录参数）
 │   ├── delete.js                 # 删除桶内文件
+│   ├── rename.js                 # 重命名文件（同目录 CopyObject + 删除旧 key）
 │   └── multipart.js              # 大文件分片上传（init/part签名/complete/abort）
 └── adapters/
-    ├── cloudflare-workers.js     # Cloudflare Workers 独立版（含全部四个接口）
-    └── esa-edge-function.js      # 阿里云 ESA 边缘函数版（含全部四个接口）
+    ├── cloudflare-workers.js     # Cloudflare Workers 独立版（含全部五个接口）
+    └── esa-edge-function.js      # 阿里云 ESA 边缘函数版（含全部五个接口）
 ```
 
 ## 准备工作（先完成免流教程）
@@ -59,7 +61,7 @@
    - ⚠️ **多条规则时注意**：OSS 按「第一条匹配的规则」生效。若存在 `*` 通配规则排在前面，会抢先匹配你的站点——请给它也加上 ETag 暴露头，或直接删除多余的通配规则
    - ⚠️ 跨域规则**生效有最长 15 分钟延迟**；改完后若浏览器仍报旧错，用无痕窗口重试（避开预检缓存）
 3. **（强烈建议）配置生命周期规则自动清理残留分片**：分片上传中断后，已传的分片会暂存 OSS 并计费。OSS 控制台 → 你的 Bucket → 数据管理 → 生命周期 → 创建规则 → 前缀 `upweb/` → 「碎片管理」勾选**过期碎片 3 天后删除**。这样任何烂尾上传都会自动清理，**不会悄悄产生存储费**
-4. 建议创建 **RAM 子账号 AccessKey**，只授权这一个 Bucket 的 `oss:PutObject`、`oss:ListObjects`、`oss:DeleteObject`、`oss:AbortMultipartUpload` 等权限（直接给 `oss:*` 限定该桶最省事），别用主账号 AK
+4. 建议创建 **RAM 子账号 AccessKey**，只授权这一个 Bucket 的 `oss:PutObject`、`oss:GetObject`（重命名复制源需要）、`oss:ListObjects`、`oss:DeleteObject`、`oss:AbortMultipartUpload` 等权限（直接给 `oss:*` 限定该桶最省事），别用主账号 AK
 
 ## 环境变量（三平台通用）
 
@@ -111,11 +113,11 @@
 - **改密码 = 全部令牌立刻失效**：密钥随密码哈希变化，旧令牌验签不过，可直接用于"踢人"
 - **令牌绑定 Bucket**：其他部署实例（即使复用同一个 SK）签发的令牌无法登录本站
 
-**云端文件**：解锁后自动加载 OSS 桶内 `upweb/` 下的文件，顶部标签页切换目录（全部/图片/视频/其他），支持分页「加载更多」、「刷新」和文件名筛选；点击缩略图打开灯箱——图片看大图、视频直接播放、其他文件可打开/下载，悬停查看文件名。
+**云端文件**：解锁后自动加载 OSS 桶内 `upweb/` 下的文件，顶部标签页切换目录（全部/图片/视频/其他），支持平铺/瀑布流/列表三种视图、按时间或大小排序、分页「加载更多」、「刷新」和文件名筛选；点击缩略图打开灯箱——图片看大图、视频直接播放，支持重命名、下载、复制链接/Markdown，其他文件可打开/下载，悬停查看文件名。
 
 历史记录只存在浏览器 localStorage，不上传、不同步。页脚「退出登录」可清除本机保存的登录令牌。
 
-> 安全说明：登录门禁只是前端体验层，真正的拦截在函数里——`/api/sign`、`/api/multipart`、`/api/list`、`/api/delete` 都会校验身份（密码或 7 天登录令牌），不对直接 401；分片接口的 key 强制 `upweb/` 前缀白名单，且 init 会签发绑定 key/uploadId/声明大小/分片上限/分片尺寸的会话令牌，合并前逐片向 OSS 核验分片号、ETag 与字节数，无法越权操作桶内其他对象、也无法「声明小传大」或「检查后偷换分片」。若未设置 `UPLOAD_PASSWORD` 或密码少于 10 位，所有接口将拒绝服务（除非显式设置 `ALLOW_ANONYMOUS_UPLOAD=true`）。
+> 安全说明：登录门禁只是前端体验层，真正的拦截在函数里——`/api/sign`、`/api/multipart`、`/api/list`、`/api/delete`、`/api/rename` 都会校验身份（密码或 7 天登录令牌），不对直接 401；分片接口的 key 强制 `upweb/` 前缀白名单，且 init 会签发绑定 key/uploadId/声明大小/分片上限/分片尺寸的会话令牌，合并前逐片向 OSS 核验分片号、ETag 与字节数，无法越权操作桶内其他对象、也无法「声明小传大」或「检查后偷换分片」。若未设置 `UPLOAD_PASSWORD` 或密码少于 10 位，所有接口将拒绝服务（除非显式设置 `ALLOW_ANONYMOUS_UPLOAD=true`）。
 
 ## 接口一览
 
@@ -125,6 +127,7 @@
 | `/api/multipart` | POST | 大文件分片上传：`action=init` 初始化（返回 uploadId+key+partSize+**会话令牌**）；`action=part` 为单个分片签发 1 小时有效的预签名 URL（校验会话令牌，分片号不得超声明上限）；`action=complete` 合并分片（先 ListParts **逐片核验**分片号/ETag/字节数与 init 声明完全一致，不符自动 Abort 清理）；`action=abort` 清理残留分片。全程密钥不出服务端 |
 | `/api/list` | POST | 列出文件，`{auth, token?, dir?}`（token 为分页游标），dir ∈ `all/img/video/other`，每页 60 条 |
 | `/api/delete` | POST | 删除文件，`{auth, key}`，仅允许 `upweb/` 前缀 |
+| `/api/rename` | POST | 重命名文件，`{auth, key, name}`（新文件名，含扩展名）：同目录 CopyObject（`x-oss-forbid-overwrite` 防覆盖，重名返回 409）+ 删除旧 key，新名字限定 `A-Za-z0-9._-` 字符集 |
 
 > 身份字段说明：所有接口接受 `password`（明文密码）或 `auth`（登录令牌）任一；分片接口的 `session` 为 init 签发的会话令牌。
 
@@ -147,7 +150,7 @@
 ## 安全提示
 
 - AccessKey 只存于服务端环境变量，前端不可见；令牌签名密钥由 `OSS SK + Bucket 名 + 密码哈希` 派生，不新增环境变量
-- **fail-closed 鉴权**：未设置 `UPLOAD_PASSWORD` 或密码少于 10 位时，四个接口全部返回 500 拒绝服务——不存在"忘配密码就裸奔"的情况；确需公开模式必须显式设置 `ALLOW_ANONYMOUS_UPLOAD=true`
+- **fail-closed 鉴权**：未设置 `UPLOAD_PASSWORD` 或密码少于 10 位时，所有接口全部返回 500 拒绝服务——不存在"忘配密码就裸奔"的情况；确需公开模式必须显式设置 `ALLOW_ANONYMOUS_UPLOAD=true`
 - 前端**不保存明文密码**：登录成功换取 7 天 HMAC 登录令牌（**硬到期不续期**，过期自动回锁屏），本机只存令牌；**修改密码立即作废所有已签发令牌**，可用于紧急踢人
 - 密码校验为 SHA-256 哈希比对 + 失败统一延迟 0.4s，拖慢在线暴力破解；仍请务必使用**强密码（≥10 位，建议更长、真正随机）**
 - 上传签名 Policy 同时绑定 **Bucket** 和精确对象键（`eq` 条件），`x-oss-forbid-overwrite` 也写入 Policy 条件（客户端无法剥离该字段来覆盖已有对象）
