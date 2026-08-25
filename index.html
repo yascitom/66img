@@ -239,7 +239,7 @@
   .toast.out{opacity:0;transition:.3s;transform:translateY(-8px)}
 
   /* ===== 登录门禁 ===== */
-  #lockScreen{position:fixed;inset:0;background:var(--bg);z-index:100;display:flex;align-items:center;justify-content:center;padding:20px}
+  #lockScreen{position:fixed;inset:0;background:var(--bg);z-index:100;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px}
   #lockScreen::before{content:'';position:absolute;inset:0;background:radial-gradient(500px 380px at 50% 30%,rgba(110,155,255,.12),transparent 65%)}
   #lockScreen.hidden{display:none}
   .lockbox{
@@ -268,6 +268,23 @@
   .lockerr{color:var(--err);font-size:12.5px;margin-top:13px;min-height:17px}
   .lockbox.shake{animation:shake .4s}
   @keyframes shake{0%,100%{transform:translateX(0)}25%{transform:translateX(-9px)}50%{transform:translateX(9px)}75%{transform:translateX(-5px)}}
+
+  /* ===== 项目地址链接 ===== */
+  .gh-link{
+    position:relative;display:inline-flex;align-items:center;gap:7px;margin-top:22px;
+    color:var(--faint);font-size:12.5px;text-decoration:none;letter-spacing:.4px;
+    padding:7px 16px;border:1px solid var(--border);border-radius:99px;background:var(--card);
+    transition:.2s;animation:rise .6s .15s cubic-bezier(.2,.8,.3,1) backwards;
+  }
+  .gh-link:hover{color:var(--text);border-color:var(--border-hover);transform:translateY(-1px)}
+  .gh-link svg{width:15px;height:15px;fill:currentColor;opacity:.85}
+  .gh-foot{
+    display:inline-flex;align-items:center;gap:6px;margin-top:4px;
+    color:var(--faint);font-size:12px;text-decoration:none;letter-spacing:.4px;
+    padding:5px 13px;border:1px solid transparent;border-radius:99px;transition:.2s;
+  }
+  .gh-foot:hover{color:var(--text);border-color:var(--border);background:var(--card)}
+  .gh-foot svg{width:13px;height:13px;fill:currentColor;opacity:.85}
 
   #mainApp{display:none}
   #mainApp.unlocked{display:block}
@@ -298,6 +315,10 @@
     <button id="lockBtn">进 入</button>
     <div class="lockerr" id="lockErr"></div>
   </div>
+  <a class="gh-link" href="https://github.com/yascitom/yunwo" target="_blank" rel="noopener noreferrer">
+    <svg viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+    云窝 · GitHub 开源项目
+  </a>
 </div>
 
 <div id="toasts"></div>
@@ -377,7 +398,11 @@
 
   <footer>
     存储：阿里云 OSS（私有桶） · 分发：Cloudflare 带宽联盟免流 · 历史记录仅保存在浏览器本地<br>
-    目录：upweb/img 图片 · upweb/video 视频 · upweb/other 其他
+    目录：upweb/img 图片 · upweb/video 视频 · upweb/other 其他<br>
+    <a class="gh-foot" href="https://github.com/yascitom/yunwo" target="_blank" rel="noopener noreferrer">
+      <svg viewBox="0 0 24 24"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+      云窝 yunwo · GitHub 开源
+    </a>
   </footer>
 </div>
 
