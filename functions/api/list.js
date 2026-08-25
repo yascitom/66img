@@ -114,9 +114,25 @@ function badInput(body) {
   }
   return '';
 }
-function bodyTooLarge(request) {
+// 读取并校验请求体：Content-Length 超限走快路径直接 413（不用读 body）；
+// 头缺失/不可信（chunked 分块传输没有此头）时按实际读入的字节数兜底，杜绝绕过
+// 返回 { body } 或 { err: Response }
+async function readJsonBody(request, cap) {
   const cl = parseInt(request.headers.get('Content-Length') || '0', 10);
-  return cl > MAX_BODY_BYTES;
+  if (cl > cap) return { err: jsonResponse({ error: '请求体过大' }, 413) };
+  let text;
+  try {
+    const buf = await request.arrayBuffer();
+    if (buf.byteLength > cap) return { err: jsonResponse({ error: '请求体过大' }, 413) };
+    text = new TextDecoder().decode(buf);
+  } catch {
+    return { err: jsonResponse({ error: '请求体读取失败' }, 400) };
+  }
+  try {
+    return { body: JSON.parse(text) };
+  } catch {
+    return { err: jsonResponse({ error: '请求体必须是 JSON' }, 400) };
+  }
 }
 
 // 对象键逐段编码（保留 / 分隔符），用于拼接对外访问 URL
@@ -228,14 +244,8 @@ async function handle(request, env) {
   const cfgErr = authConfigError(env);
   if (cfgErr) return jsonResponse({ error: cfgErr }, 500);
 
-  if (bodyTooLarge(request)) return jsonResponse({ error: '请求体过大' }, 413);
-
-  let body;
-  try {
-    body = await request.json();
-  } catch {
-    return jsonResponse({ error: '请求体必须是 JSON' }, 400);
-  }
+  const { body, err } = await readJsonBody(request, MAX_BODY_BYTES);
+  if (err) return err;
   const inputErr = badInput(body);
   if (inputErr) return jsonResponse({ error: inputErr }, 400);
 
