@@ -161,16 +161,35 @@ async function readJsonBody(request, cap) {
 const IMG_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'avif', 'bmp', 'ico', 'tiff'];
 const VIDEO_EXTS = ['mp4', 'webm', 'mov', 'mkv', 'm4v', 'avi', 'flv', 'ts'];
 
-// 按扩展名归类目录，生成随机对象键：upweb/img/20260824/a1b2c3....webp
-function makeObjectKey(filename) {
+// 文件主体名清洗：保留中文 / 字母数字 / . _ -，其余字符替换为 -，折叠重复、去首尾点与连字符，
+// 最长 80 字符。与 delete/rename/multipart/upload 的 KEY_RE / NAME_RE 白名单保持一致。
+function sanitizeBaseName(filename) {
+  let base = String(filename).replace(/\.[^.]*$/, ''); // 去掉最后一个扩展名
+  base = base.replace(/[\/\\]/g, '-');
+  base = base.replace(/[^A-Za-z0-9._\-一-鿿㐀-䶿]/g, '-'); // 一-鿿 = CJK 基本区，㐀-䶿 = 扩展 A 区
+  base = base.replace(/-{2,}/g, '-').replace(/^[.\-]+|[.\-]+$/g, '');
+  if (base.length > 80) base = base.slice(0, 80).replace(/[.\-]+$/, '');
+  return base;
+}
+
+// 按扩展名归类目录，生成对象键：upweb/img/20260824/xxx.webp
+// keepName=true 时用清洗后的原文件名（同名冲突会被 x-oss-forbid-overwrite 拒绝，不会静默覆盖）；
+// 否则用随机 UUID。
+function makeObjectKey(filename, keepName) {
   const ext = filename.includes('.') ? (filename.split('.').pop() || 'bin').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8) || 'bin' : 'bin';
   const dir = IMG_EXTS.includes(ext) ? 'upweb/img'
     : VIDEO_EXTS.includes(ext) ? 'upweb/video'
     : 'upweb/other';
   const d = new Date();
   const datePath = d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0');
-  const rand = crypto.randomUUID().replace(/-/g, '');
-  return `${dir}/${datePath}/${rand}.${ext}`;
+  let base = keepName ? sanitizeBaseName(filename) : '';
+  if (!base) base = crypto.randomUUID().replace(/-/g, ''); // 清洗后为空（如纯表情文件名）则回退随机名
+  return `${dir}/${datePath}/${base}.${ext}`;
+}
+
+// 对象键逐段编码（保留 / 分隔符），用于拼接 URL 路径（中文文件名必须编码）
+function encodeKeyPath(key) {
+  return key.split('/').map(encodeURIComponent).join('/');
 }
 
 async function handle(request, env) {
@@ -217,7 +236,7 @@ async function handle(request, env) {
     return jsonResponse({ error: `文件大小超限（上限 ${maxMB}MB）` }, 400);
   }
 
-  const objectKey = makeObjectKey(body.filename || 'file.bin');
+  const objectKey = makeObjectKey(body.filename || 'file.bin', body.keepName === true);
 
   // PostObject Policy：10 分钟有效；大小受限；bucket 与 key 精确绑定本次生成；
   // x-oss-forbid-overwrite 也写进 Policy 条件，客户端无法剥离该字段来覆盖已有对象
@@ -243,7 +262,7 @@ async function handle(request, env) {
       signature,
       'x-oss-forbid-overwrite': 'true', // 双保险：禁止覆盖同名对象
     },
-    url: `${env.PUBLIC_URL_BASE.replace(/\/$/, '')}/${objectKey}`,
+    url: `${env.PUBLIC_URL_BASE.replace(/\/$/, '')}/${encodeKeyPath(objectKey)}`,
     dir: objectKey.split('/').slice(0, 2).join('/'), // 如 upweb/img
   });
 }
