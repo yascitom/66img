@@ -185,6 +185,16 @@
   }
   .searchbox input::placeholder{color:var(--faint)}
 
+  /* ===== 排序下拉 ===== */
+  .sortsel{
+    appearance:none;-webkit-appearance:none;outline:none;cursor:pointer;
+    background:var(--w6) url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="10" height="6" viewBox="0 0 10 6"><path d="M1 1l4 4 4-4" fill="none" stroke="%238b93a7" stroke-width="1.6" stroke-linecap="round"/></svg>') no-repeat right 10px center/10px;
+    border:1px solid var(--border);color:var(--muted);
+    border-radius:8px;font-size:12px;padding:6px 28px 6px 12px;transition:.2s;
+  }
+  .sortsel:hover{color:var(--text);border-color:var(--border-hover)}
+  .sortsel option{background:var(--card-solid);color:var(--text)}
+
   /* ===== 文件网格 ===== */
   .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:12px}
   .gitem{
@@ -428,6 +438,12 @@
     <div class="sec-title">
       <span>云端文件 <span class="count-tag" id="cloudCount"></span></span>
       <div class="ops">
+        <select class="sortsel" id="cloudSort" title="排序方式">
+          <option value="time_desc">最新上传</option>
+          <option value="time_asc">最早上传</option>
+          <option value="size_desc">文件最大</option>
+          <option value="size_asc">文件最小</option>
+        </select>
         <div class="searchbox">🔍 <input type="text" id="cloudSearch" placeholder="筛选文件名…"></div>
         <button class="mini-btn" id="cloudRefresh">刷新</button>
       </div>
@@ -960,6 +976,18 @@
   let curDir='all';
   const TYPE_DIR={image:'img',video:'video',other:'other'};
 
+  // 排序方式（记住用户选择；对全部 / 图片 / 视频 / 其他 所有标签页生效）
+  const SORT_KEY='yunwo_sort';
+  let curSort=localStorage.getItem(SORT_KEY)||'time_desc';
+  function sortItems(items){
+    const arr=[...items];
+    if(curSort==='time_asc') arr.sort((a,b)=>new Date(a.time||0)-new Date(b.time||0));
+    else if(curSort==='size_desc') arr.sort((a,b)=>(b.size||0)-(a.size||0));
+    else if(curSort==='size_asc') arr.sort((a,b)=>(a.size||0)-(b.size||0));
+    else arr.sort((a,b)=>new Date(b.time||0)-new Date(a.time||0)); // time_desc 默认：最新在前
+    return arr;
+  }
+
   // 目录标签页切换
   $('dirTabs').addEventListener('click',e=>{
     const tab=e.target.closest('.tab');
@@ -981,7 +1009,8 @@
     const list=$('cloudList');
     list.innerHTML='';
     const kw=(filter||'').toLowerCase();
-    const items=kw? cloudItems.filter(f=>f.key.toLowerCase().includes(kw)) : cloudItems;
+    const base=kw? cloudItems.filter(f=>f.key.toLowerCase().includes(kw)) : cloudItems;
+    const items=sortItems(base);
     $('cloudCount').textContent=kw? `（筛选出 ${items.length} / 共 ${cloudItems.length}）` : (cloudItems.length?`（${cloudItems.length}）`:'');
     if(!items.length){
       list.innerHTML='<div class="empty" style="grid-column:1/-1">'+(kw?'没有匹配的文件':'这个目录还是空的，传一个试试 ↑')+'</div>';
@@ -1038,6 +1067,12 @@
   $('cloudRefresh').addEventListener('click',()=>loadCloud(false));
   $('cloudMore').addEventListener('click',()=>loadCloud(true));
   $('cloudSearch').addEventListener('input',e=>renderCloud(e.target.value));
+  const sortSel=$('cloudSort');
+  sortSel.value=['time_desc','time_asc','size_desc','size_asc'].includes(curSort)?curSort:'time_desc';
+  sortSel.addEventListener('change',()=>{
+    curSort=sortSel.value; localStorage.setItem(SORT_KEY,curSort);
+    renderCloud($('cloudSearch').value);
+  });
 
   // ================= 灯箱 =================
   let lbCurrent=null;
