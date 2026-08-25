@@ -196,7 +196,7 @@ async function verifyAuth(body, env) {
 const MAX_BODY_BYTES = 8192;
 function badInput(body) {
   if (!body || typeof body !== 'object') return '请求体必须是 JSON 对象';
-  const limits = { password: 128, auth: 2048, key: 512, name: 256 };
+  const limits = { password: 128, auth: 2048, key: 512, name: 256, dir: 16 };
   for (const k of Object.keys(limits)) {
     if (typeof body[k] === 'string' && body[k].length > limits[k]) return '参数非法';
   }
@@ -221,19 +221,22 @@ async function readJsonBody(request, cap) {
   }
 }
 
-// key 白名单：upweb/ 前缀 + 安全字符集（字母数字 . _ - /），禁 .. 与可注入字符
-const KEY_RE = /^upweb\/[A-Za-z0-9._\/-]+$/;
+// key 白名单：upweb/ 前缀 + 安全字符集（字母数字 / 中文 / . _ - /），禁 .. 与可注入字符
+const KEY_RE = /^upweb\/[A-Za-z0-9._\/\-一-鿿㐀-䶿]+$/;
 function validKey(key) {
   return typeof key === 'string' && key.length <= 512 && KEY_RE.test(key) && !key.includes('..');
 }
 
-// 新文件名校验：与全站一致的 ASCII 安全字符集（保证改名后仍可被 list/delete 正常处理）；
+// 新文件名校验：与全站一致的安全字符集（中文 / 字母数字 / . _ -，保证改名后仍可被 list/delete 正常处理）；
 // 不允许以 . 开头、不允许纯点、不允许带目录分隔符
-const NAME_RE = /^[A-Za-z0-9._-]+$/;
+const NAME_RE = /^[A-Za-z0-9._\-一-鿿㐀-䶿]+$/;
 function validName(name) {
   return typeof name === 'string' && name.length <= 200 && NAME_RE.test(name)
     && !name.startsWith('.') && !name.includes('..');
 }
+
+// 可移动的目标目录（与前端目录标签一致）
+const MOVE_DIRS = ['img', 'video', 'other'];
 
 async function handle(request, env) {
   if (request.method !== 'POST') {
@@ -263,12 +266,31 @@ async function handle(request, env) {
   }
 
   const name = String(body.name || '').trim();
-  if (!validName(name)) {
-    return jsonResponse({ error: '文件名只允许字母、数字、点、下划线、连字符（≤200 字符，不能以点开头）' }, 400);
+  const moveDir = String(body.dir || '');
+  if (!name && !moveDir) {
+    return jsonResponse({ error: '缺少参数：name（改名）或 dir（移动目录）至少提供一个' }, 400);
+  }
+  if (name && !validName(name)) {
+    return jsonResponse({ error: '文件名只允许中文、字母、数字、点、下划线、连字符（≤200 字符，不能以点开头）' }, 400);
+  }
+  if (moveDir && !MOVE_DIRS.includes(moveDir)) {
+    return jsonResponse({ error: '目标目录非法（仅支持 img / video / other）' }, 400);
   }
 
-  const dirPrefix = key.slice(0, key.lastIndexOf('/') + 1);
-  const newKey = dirPrefix + name;
+  // 移动目录：保留日期路径，只替换 upweb/ 后的第一级目录（upweb/img/20260824/x.jpg → upweb/video/20260824/x.jpg）
+  let newKey = key;
+  if (moveDir) {
+    const parts = key.split('/');
+    if (parts.length < 3) {
+      return jsonResponse({ error: '对象路径结构非法，无法移动' }, 400);
+    }
+    parts[1] = moveDir;
+    newKey = parts.join('/');
+  }
+  // 改名：替换最后一段文件名（可与移动目录叠加）
+  if (name) {
+    newKey = newKey.slice(0, newKey.lastIndexOf('/') + 1) + name;
+  }
   if (!validKey(newKey)) {
     return jsonResponse({ error: '新文件名不合法' }, 400);
   }

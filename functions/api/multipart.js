@@ -57,16 +57,28 @@ function xmlEscape(s) {
 const IMG_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'avif', 'bmp', 'ico', 'tiff'];
 const VIDEO_EXTS = ['mp4', 'webm', 'mov', 'mkv', 'm4v', 'avi', 'flv', 'ts'];
 
+// 文件主体名清洗：保留中文 / 字母数字 / . _ -，其余替换为 -，最长 80 字符（与 sign.js 一致）
+function sanitizeBaseName(filename) {
+  let base = String(filename).replace(/\.[^.]*$/, ''); // 去掉最后一个扩展名
+  base = base.replace(/[\/\\]/g, '-');
+  base = base.replace(/[^A-Za-z0-9._\-一-鿿㐀-䶿]/g, '-'); // 一-鿿 = CJK 基本区，㐀-䶿 = 扩展 A 区
+  base = base.replace(/-{2,}/g, '-').replace(/^[.\-]+|[.\-]+$/g, '');
+  if (base.length > 80) base = base.slice(0, 80).replace(/[.\-]+$/, '');
+  return base;
+}
+
 // 与 sign.js 同一套目录归类规则，保证两种上传方式落到相同路径
-function makeObjectKey(filename) {
+// keepName=true 时用清洗后的原文件名；否则用随机 UUID
+function makeObjectKey(filename, keepName) {
   const ext = filename.includes('.') ? (filename.split('.').pop() || 'bin').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8) || 'bin' : 'bin';
   const dir = IMG_EXTS.includes(ext) ? 'upweb/img'
     : VIDEO_EXTS.includes(ext) ? 'upweb/video'
     : 'upweb/other';
   const d = new Date();
   const datePath = d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0');
-  const rand = crypto.randomUUID().replace(/-/g, '');
-  return `${dir}/${datePath}/${rand}.${ext}`;
+  let base = keepName ? sanitizeBaseName(filename) : '';
+  if (!base) base = crypto.randomUUID().replace(/-/g, '');
+  return `${dir}/${datePath}/${base}.${ext}`;
 }
 
 // ------------------------------------------------------------
@@ -206,9 +218,9 @@ function rejectSession() {
   return jsonResponse({ error: '分片会话无效或已过期，请重新选择文件上传', code: 'BAD_SESSION' }, 400);
 }
 
-// key 白名单校验：只允许 upweb/ 前缀 + 安全字符集（字母数字 . _ - /），
+// key 白名单校验：只允许 upweb/ 前缀 + 安全字符集（字母数字 / 中文 / . _ - /），
 // 禁止 .. 和引号/尖括号等可注入字符，杜绝恶意 key 引发的存储型 XSS
-const KEY_RE = /^upweb\/[A-Za-z0-9._\/-]+$/;
+const KEY_RE = /^upweb\/[A-Za-z0-9._\/\-一-鿿㐀-䶿]+$/;
 function validKey(key) {
   return typeof key === 'string' && key.length <= 512 && KEY_RE.test(key) && !key.includes('..');
 }
@@ -326,7 +338,18 @@ async function handle(request, env) {
         return jsonResponse({ error: `文件大小超限（上限 ${maxMB}MB）` }, 400);
       }
       const mime = String(body.mime || 'application/octet-stream').slice(0, 100) || 'application/octet-stream';
-      const key = makeObjectKey(body.filename || 'file.bin');
+      const key = makeObjectKey(body.filename || 'file.bin', body.keepName === true);
+
+      // 保留原文件名时做存在性预检（InitMultipart 不带 forbid-overwrite，合并时会静默覆盖同名对象）；
+      // 需要 RAM 授权 oss:GetObject。随机 UUID key 几乎不可能碰撞，跳过预检省一次请求。
+      if (body.keepName === true) {
+        try {
+          await ossRequest(env, 'GET', key, '?objectMeta', '', null);
+          return jsonResponse({ error: `同名文件已存在：${key.split('/').pop()}（请先重命名或删除旧文件）`, code: 'CONFLICT' }, 409);
+        } catch (e) {
+          if (!/NoSuchKey|404|NoSuchObject/.test(e.message)) throw e; // 非「不存在」错误（如权限不足）如实上报
+        }
+      }
 
       const xml = await ossRequest(env, 'POST', key, '?uploads', mime, null);
       const uploadId = (xml.match(/<UploadId>([^<]+)<\/UploadId>/) || [])[1];
