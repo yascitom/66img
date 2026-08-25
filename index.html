@@ -5,16 +5,38 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>云窝 · OSS Private Drive</title>
 <meta name="description" content="云窝 —— 基于阿里云 OSS 私有桶 + Cloudflare 免流分发的私有图床与小型网盘">
+<meta name="theme-color" content="#0b0d12" id="themeColorMeta">
 <style>
   :root{
-    --bg:#0b0d12; --card:rgba(255,255,255,.04); --card-solid:#151822;
-    --border:rgba(255,255,255,.09); --border-hover:rgba(255,255,255,.2);
+    color-scheme:dark;
+    --bg:#0b0d12; --card:var(--w4); --card-solid:#151822;
+    --border:var(--w9); --border-hover:var(--w20);
     --text:#eef0f6; --muted:#8b93a7; --faint:#565e72;
     --accent:#6e9bff; --accent2:#9a7bff;
     --grad:linear-gradient(135deg,#6e9bff 0%,#9a7bff 100%);
     --ok:#3ecf8e; --err:#f0645a; --warn:#ffc466;
     --radius:16px;
     --shadow:0 8px 32px rgba(0,0,0,.35);
+    --overlay:rgba(5,6,10,.88);
+    --toast-bg:rgba(24,27,36,.92);
+    /* 半透明前景色阶（白天主题整体反转为深色系） */
+    --w2:rgba(255,255,255,.02); --w3:rgba(255,255,255,.03); --w4:rgba(255,255,255,.04);
+    --w5:rgba(255,255,255,.05); --w6:rgba(255,255,255,.06); --w7:rgba(255,255,255,.07);
+    --w8:rgba(255,255,255,.08); --w9:rgba(255,255,255,.09); --w10:rgba(255,255,255,.1);
+    --w12:rgba(255,255,255,.12); --w20:rgba(255,255,255,.2);
+  }
+  html[data-theme=light]{
+    color-scheme:light;
+    --bg:#f2f4fa; --card:var(--w4); --card-solid:#ffffff;
+    --border:var(--w10); --border-hover:var(--w20);
+    --text:#1b2233; --muted:#5b657a; --faint:#98a0b3;
+    --shadow:0 10px 30px rgba(31,41,66,.10);
+    --overlay:rgba(242,244,250,.9);
+    --toast-bg:rgba(255,255,255,.95);
+    --w2:rgba(15,23,42,.02); --w3:rgba(15,23,42,.03); --w4:rgba(15,23,42,.04);
+    --w5:rgba(15,23,42,.05); --w6:rgba(15,23,42,.06); --w7:rgba(15,23,42,.07);
+    --w8:rgba(15,23,42,.08); --w9:rgba(15,23,42,.1); --w10:rgba(15,23,42,.11);
+    --w12:rgba(15,23,42,.14); --w20:rgba(15,23,42,.22);
   }
   *{box-sizing:border-box;margin:0;padding:0}
   ::selection{background:rgba(110,155,255,.35)}
@@ -46,7 +68,10 @@
     background:var(--card);border:1px solid var(--border);color:var(--muted);
     border-radius:10px;font-size:12.5px;padding:8px 14px;cursor:pointer;transition:.2s;
   }
-  .headbtn:hover{color:var(--err);border-color:rgba(240,100,90,.4)}
+  .headbtn:hover{color:var(--text);border-color:var(--border-hover)}
+  .headbtn.danger:hover{color:var(--err);border-color:rgba(240,100,90,.4)}
+  .headops{display:flex;gap:8px;align-items:center}
+  .theme-fab{position:absolute;top:18px;right:18px;z-index:2}
 
   /* ===== 卡片 ===== */
   .card{
@@ -61,7 +86,7 @@
   .sec-title{font-size:14.5px;font-weight:600;letter-spacing:.3px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;gap:10px}
   .sec-title .ops{display:flex;gap:8px;align-items:center}
   .mini-btn{
-    background:rgba(255,255,255,.06);border:1px solid var(--border);color:var(--muted);
+    background:var(--w6);border:1px solid var(--border);color:var(--muted);
     border-radius:8px;font-size:12px;padding:6px 12px;cursor:pointer;transition:.2s;white-space:nowrap;
   }
   .mini-btn:hover{color:var(--text);border-color:var(--border-hover)}
@@ -71,7 +96,7 @@
   /* ===== 目录标签页 ===== */
   .tabs{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap}
   .tab{
-    background:rgba(255,255,255,.05);border:1px solid var(--border);color:var(--muted);
+    background:var(--w5);border:1px solid var(--border);color:var(--muted);
     border-radius:99px;font-size:12.5px;padding:7px 16px;cursor:pointer;transition:.2s;letter-spacing:.3px;
   }
   .tab:hover{color:var(--text);border-color:var(--border-hover)}
@@ -81,7 +106,7 @@
   #dropzone{
     border:1.5px dashed var(--border-hover);border-radius:14px;
     padding:46px 20px;text-align:center;cursor:pointer;transition:.25s;
-    background:rgba(255,255,255,.02);
+    background:var(--w2);
   }
   #dropzone:hover,#dropzone.dragover{border-color:var(--accent);background:rgba(110,155,255,.07);transform:scale(1.005)}
   #dropzone .icon{
@@ -91,13 +116,13 @@
   #dropzone p{font-size:14.5px;line-height:1.9}
   #dropzone .hint{font-size:12px;color:var(--faint)}
   kbd{
-    background:rgba(255,255,255,.08);border:1px solid var(--border);border-radius:5px;
+    background:var(--w8);border:1px solid var(--border);border-radius:5px;
     padding:1px 6px;font-size:11.5px;font-family:inherit;
   }
 
   .settings{display:flex;gap:18px;flex-wrap:wrap;align-items:center;margin-top:16px;font-size:13px;color:var(--muted)}
   .switch{display:flex;align-items:center;gap:8px;cursor:pointer;user-select:none}
-  .switch input{appearance:none;width:34px;height:19px;border-radius:99px;background:rgba(255,255,255,.12);position:relative;cursor:pointer;transition:.2s;flex:none}
+  .switch input{appearance:none;width:34px;height:19px;border-radius:99px;background:var(--w12);position:relative;cursor:pointer;transition:.2s;flex:none}
   .switch input:checked{background:var(--grad)}
   .switch input::after{content:'';position:absolute;top:2.5px;left:2.5px;width:14px;height:14px;border-radius:50%;background:#fff;transition:.2s}
   .switch input:checked::after{transform:translateX(15px)}
@@ -107,25 +132,25 @@
   #queue{display:none;margin-top:16px;flex-direction:column;gap:10px}
   #queue.has{display:flex}
   .qitem{
-    display:flex;gap:12px;align-items:center;background:rgba(255,255,255,.03);
+    display:flex;gap:12px;align-items:center;background:var(--w3);
     border:1px solid var(--border);border-radius:12px;padding:10px 14px 10px 10px;
     animation:rise .3s backwards;
   }
   .qitem img{width:46px;height:46px;border-radius:9px;object-fit:cover;flex:none;border:1px solid var(--border)}
   .qitem .qico{
     width:46px;height:46px;border-radius:9px;flex:none;border:1px solid var(--border);
-    background:rgba(255,255,255,.04);display:flex;align-items:center;justify-content:center;font-size:21px;
+    background:var(--w4);display:flex;align-items:center;justify-content:center;font-size:21px;
   }
   .qitem .info{flex:1;min-width:0}
   .qitem .name{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .qitem .st{font-size:11.5px;color:var(--muted);margin-top:3px}
   .qitem .st.ok{color:var(--ok)} .qitem .st.err{color:var(--err)}
-  .qbar{height:3px;background:rgba(255,255,255,.08);border-radius:99px;margin-top:6px;overflow:hidden}
+  .qbar{height:3px;background:var(--w8);border-radius:99px;margin-top:6px;overflow:hidden}
   .qbar>i{display:block;height:100%;width:0;background:var(--grad);transition:width .25s;border-radius:99px}
   .qact{flex:none;display:flex;gap:6px}
   .qbtn{
     border:none;border-radius:8px;font-size:11.5px;padding:5px 10px;cursor:pointer;
-    background:rgba(255,255,255,.07);color:var(--muted);transition:.2s;
+    background:var(--w7);color:var(--muted);transition:.2s;
   }
   .qbtn:hover{color:var(--text)}
   .qbtn.primary{background:var(--grad);color:#fff}
@@ -134,10 +159,10 @@
   .linkrow{display:flex;gap:8px;margin-bottom:8px}
   .linkrow .fmt{
     flex:none;width:82px;text-align:center;font-size:11.5px;padding:10px 0;letter-spacing:.3px;
-    background:rgba(255,255,255,.04);border:1px solid var(--border);border-radius:9px;color:var(--muted)
+    background:var(--w4);border:1px solid var(--border);border-radius:9px;color:var(--muted)
   }
   .linkrow input{
-    flex:1;min-width:0;background:rgba(255,255,255,.03);border:1px solid var(--border);
+    flex:1;min-width:0;background:var(--w3);border:1px solid var(--border);
     border-radius:9px;color:var(--text);padding:0 12px;font-size:12.5px;outline:none;font-family:ui-monospace,monospace;
   }
   .linkrow input:focus{border-color:var(--accent)}
@@ -150,7 +175,7 @@
 
   /* ===== 搜索 ===== */
   .searchbox{
-    display:flex;align-items:center;gap:8px;background:rgba(255,255,255,.04);
+    display:flex;align-items:center;gap:8px;background:var(--w4);
     border:1px solid var(--border);border-radius:10px;padding:0 12px;flex:1;max-width:260px;
   }
   .searchbox input{
@@ -163,7 +188,7 @@
   .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:12px}
   .gitem{
     position:relative;border-radius:12px;overflow:hidden;border:1px solid var(--border);
-    cursor:pointer;aspect-ratio:1;background:rgba(255,255,255,.03);
+    cursor:pointer;aspect-ratio:1;background:var(--w3);
     transition:.2s;animation:rise .35s backwards;
   }
   .gitem:hover{border-color:var(--border-hover);transform:translateY(-2px);box-shadow:0 8px 24px rgba(0,0,0,.4)}
@@ -188,18 +213,18 @@
   .ftile .fico{font-size:36px;filter:drop-shadow(0 4px 10px rgba(0,0,0,.4))}
   .ftile .fext{
     font-size:10px;color:var(--muted);letter-spacing:1.5px;text-transform:uppercase;
-    background:rgba(255,255,255,.05);border:1px solid var(--border);border-radius:6px;padding:2px 9px;
+    background:var(--w5);border:1px solid var(--border);border-radius:6px;padding:2px 9px;
   }
   .gitem:hover .ftile{background:rgba(110,155,255,.05)}
   .empty{color:var(--faint);font-size:13px;text-align:center;padding:26px 0;line-height:1.9}
 
   /* ===== 骨架屏 ===== */
-  .skel{border-radius:12px;aspect-ratio:1;background:linear-gradient(100deg,rgba(255,255,255,.04) 40%,rgba(255,255,255,.09) 50%,rgba(255,255,255,.04) 60%);background-size:200% 100%;animation:shine 1.3s infinite}
+  .skel{border-radius:12px;aspect-ratio:1;background:linear-gradient(100deg,var(--w4) 40%,var(--w9) 50%,var(--w4) 60%);background-size:200% 100%;animation:shine 1.3s infinite}
   @keyframes shine{to{background-position:-200% 0}}
 
   /* ===== 灯箱 ===== */
   #lightbox{
-    position:fixed;inset:0;background:rgba(5,6,10,.88);backdrop-filter:blur(10px);
+    position:fixed;inset:0;background:var(--overlay);backdrop-filter:blur(10px);
     z-index:90;display:none;align-items:center;justify-content:center;padding:30px;
   }
   #lightbox.show{display:flex;animation:fadein .2s}
@@ -217,10 +242,10 @@
   .lb-meta{font-size:12.5px;color:var(--muted);margin:14px 0;word-break:break-all;line-height:1.8}
   .lb-ops{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
   .lb-ops button{
-    border:1px solid var(--border);background:rgba(255,255,255,.06);color:var(--text);
+    border:1px solid var(--border);background:var(--w6);color:var(--text);
     border-radius:10px;padding:9px 18px;font-size:13px;cursor:pointer;transition:.2s;
   }
-  .lb-ops button:hover{border-color:var(--border-hover);background:rgba(255,255,255,.1)}
+  .lb-ops button:hover{border-color:var(--border-hover);background:var(--w10)}
   .lb-ops .danger{color:var(--err)}
   .lb-ops .danger:hover{border-color:rgba(240,100,90,.5);background:rgba(240,100,90,.1)}
   .lb-ops .danger.confirm{background:var(--err);color:#fff;border-color:var(--err)}
@@ -228,7 +253,7 @@
   /* ===== Toast ===== */
   #toasts{position:fixed;top:22px;left:50%;transform:translateX(-50%);z-index:200;display:flex;flex-direction:column;gap:8px;align-items:center;pointer-events:none}
   .toast{
-    background:rgba(24,27,36,.92);border:1px solid var(--border);color:var(--text);
+    background:var(--toast-bg);border:1px solid var(--border);color:var(--text);
     border-radius:99px;padding:9px 20px;font-size:13px;backdrop-filter:blur(10px);
     box-shadow:0 8px 30px rgba(0,0,0,.45);animation:toastin .3s cubic-bezier(.2,.8,.3,1);
     max-width:86vw;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
@@ -255,7 +280,7 @@
   .lockbox h2{font-size:19px;margin-bottom:8px;font-weight:650}
   .lockbox p{color:var(--muted);font-size:12.5px;margin-bottom:24px;line-height:1.8}
   .lockbox input{
-    width:100%;background:rgba(255,255,255,.05);border:1px solid var(--border);border-radius:12px;
+    width:100%;background:var(--w5);border:1px solid var(--border);border-radius:12px;
     color:var(--text);padding:13px 15px;font-size:14.5px;outline:none;text-align:center;margin-bottom:13px;transition:.2s;
   }
   .lockbox input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(110,155,255,.15)}
@@ -297,9 +322,35 @@
   footer{margin-top:30px;text-align:center;color:var(--faint);font-size:12px;line-height:2}
 
   @media (max-width:560px){
-    .wrap{padding:30px 14px 60px}
-    .card{padding:18px}
-    #dropzone{padding:36px 14px}
+    .wrap{padding:26px 12px 60px}
+    .card{padding:16px;margin-bottom:16px}
+    #dropzone{padding:32px 12px}
+    #dropzone p{font-size:13.5px}
+    header{margin-bottom:22px}
+    .logo{width:38px;height:38px;font-size:18px;border-radius:11px}
+    .brand h1{font-size:18px}
+    .brand small{font-size:11px}
+    .headbtn{padding:7px 11px;font-size:12px}
+    .sec-title{flex-wrap:wrap}
+    .searchbox{max-width:none;flex:1 1 150px}
+    .tabs{gap:6px}
+    .tab{padding:6px 13px;font-size:12px}
+    .grid{grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:10px}
+    .settings{gap:12px;font-size:12.5px}
+    #lightbox{padding:16px}
+    .lb-box img,.lb-box video{max-height:58vh}
+    .lb-file{padding:28px 20px}
+    .lb-meta{margin:10px 0;font-size:12px}
+    .lb-ops button{padding:8px 13px;font-size:12.5px}
+    .toast{font-size:12.5px;padding:8px 16px}
+    .linkrow .fmt{width:64px;font-size:11px}
+    .lockbox{padding:34px 22px}
+    footer{font-size:11.5px}
+  }
+  /* 超小屏再收紧 */
+  @media (max-width:360px){
+    .grid{grid-template-columns:repeat(auto-fill,minmax(92px,1fr))}
+    .tabs{flex-wrap:wrap}
   }
 </style>
 </head>
@@ -307,6 +358,7 @@
 
 <!-- 登录门禁 -->
 <div id="lockScreen">
+  <button class="headbtn themebtn theme-fab" id="themeBtnLock" title="切换白天/夜晚主题">☀️</button>
   <div class="lockbox" id="lockbox">
     <div class="lockicon">🔒</div>
     <h2>云窝</h2>
@@ -344,7 +396,10 @@
       <div class="logo">🪺</div>
       <h1>云窝<small>OSS 私有存储 · Cloudflare 免流分发</small></h1>
     </div>
-    <button class="headbtn" id="logoutBtn">退出登录</button>
+    <div class="headops">
+      <button class="headbtn themebtn" id="themeBtn" title="切换白天/夜晚主题">☀️</button>
+      <button class="headbtn danger" id="logoutBtn">退出登录</button>
+    </div>
   </header>
 
   <!-- 上传 -->
@@ -425,6 +480,24 @@
       if(v!==null) localStorage.removeItem(oldK);
     });
   })();
+  // ================= 主题（白天 / 夜晚） =================
+  // 首次访问按本机时间自动选择：7:00~18:59 用白天主题，其余时间用夜晚主题；
+  // 手动切换后记住选择，之后不再自动判断
+  const THEME_KEY='yunwo_theme';
+  function applyTheme(t){
+    document.documentElement.dataset.theme=t;
+    document.querySelectorAll('.themebtn').forEach(b=>b.textContent=(t==='light'?'🌙':'☀️'));
+    const m=$('themeColorMeta'); if(m) m.content=t==='light'?'#f2f4fa':'#0b0d12';
+  }
+  (function initTheme(){
+    let t=localStorage.getItem(THEME_KEY);
+    if(t!=='light'&&t!=='dark'){ const h=new Date().getHours(); t=(h>=7&&h<19)?'light':'dark'; }
+    applyTheme(t);
+  })();
+  document.querySelectorAll('.themebtn').forEach(b=>b.addEventListener('click',()=>{
+    const cur=document.documentElement.dataset.theme==='light'?'dark':'light';
+    localStorage.setItem(THEME_KEY,cur); applyTheme(cur);
+  }));
   const DEMO_PASSWORD='demo1234';
   // 超过该大小走分片上传（Multipart）；小文件走 PostObject 一次直传
   // 与服务端 PART_SIZE_MB 默认 10MB 对齐；分片即签即传，慢网络不限总时长、支持断点续传
