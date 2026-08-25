@@ -1,6 +1,6 @@
 // ============================================================
 // OSS 直传签名 —— Cloudflare Workers 独立版（Module Worker）
-// 路由：POST /api/sign、POST /api/list、POST /api/delete、POST /api/rename、POST /api/multipart（大文件分片上传）
+// 路由：POST /api/sign、POST /api/list、POST /api/delete、POST /api/rename（改名/移动目录）、POST /api/multipart（大文件分片上传）、POST /api/upload（PicGo 兼容直传）
 // 部署：Workers 控制台新建 Worker → 粘贴本文件 → Settings → Variables 配置环境变量
 //       （也可直接 wrangler deploy）
 // 前端 index.html 可托管在任何地方（CF Pages / EO Pages / 本地），
@@ -174,16 +174,28 @@ function rejectSession() {
 const IMG_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'avif', 'bmp', 'ico', 'tiff'];
 const VIDEO_EXTS = ['mp4', 'webm', 'mov', 'mkv', 'm4v', 'avi', 'flv', 'ts'];
 
+// 文件主体名清洗：保留中文 / 字母数字 / . _ -，其余替换为 -，最长 80 字符
+function sanitizeBaseName(filename) {
+  let base = String(filename).replace(/\.[^.]*$/, ''); // 去掉最后一个扩展名
+  base = base.replace(/[\/\\]/g, '-');
+  base = base.replace(/[^A-Za-z0-9._\-一-鿿㐀-䶿]/g, '-'); // 一-鿿 = CJK 基本区，㐀-䶿 = 扩展 A 区
+  base = base.replace(/-{2,}/g, '-').replace(/^[.\-]+|[.\-]+$/g, '');
+  if (base.length > 80) base = base.slice(0, 80).replace(/[.\-]+$/, '');
+  return base;
+}
+
 // 按扩展名归类目录：upweb/img 图片 · upweb/video 视频 · upweb/other 其他
-function makeObjectKey(filename) {
+// keepName=true 时用清洗后的原文件名；否则用随机 UUID
+function makeObjectKey(filename, keepName) {
   const ext = filename.includes('.') ? (filename.split('.').pop() || 'bin').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8) || 'bin' : 'bin';
   const dir = IMG_EXTS.includes(ext) ? 'upweb/img'
     : VIDEO_EXTS.includes(ext) ? 'upweb/video'
     : 'upweb/other';
   const d = new Date();
   const datePath = d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0');
-  const rand = crypto.randomUUID().replace(/-/g, '');
-  return `${dir}/${datePath}/${rand}.${ext}`;
+  let base = keepName ? sanitizeBaseName(filename) : '';
+  if (!base) base = crypto.randomUUID().replace(/-/g, '');
+  return `${dir}/${datePath}/${base}.${ext}`;
 }
 
 // 目录白名单：全部 / 图片 / 视频 / 其他
@@ -369,8 +381,10 @@ async function copyObject(env, oldKey, newKey) {
   }
 }
 
-// 新文件名校验：与全站一致的 ASCII 安全字符集（保证改名后仍可被 list/delete 正常处理）
-const NAME_RE = /^[A-Za-z0-9._-]+$/;
+// 新文件名校验：与全站一致的安全字符集（中文 / 字母数字 / . _ -，保证改名后仍可被 list/delete 正常处理）
+const NAME_RE = /^[A-Za-z0-9._\-一-鿿㐀-䶿]+$/;
+// 可移动的目标目录（与前端目录标签一致）
+const MOVE_DIRS = ['img', 'video', 'other'];
 function validName(name) {
   return typeof name === 'string' && name.length <= 200 && NAME_RE.test(name)
     && !name.startsWith('.') && !name.includes('..');
@@ -396,10 +410,29 @@ async function handleRename(request, env) {
     return jsonResponse({ error: '仅允许重命名 upweb/ 前缀下的文件' }, 400);
   }
   const name = String(body.name || '').trim();
-  if (!validName(name)) {
-    return jsonResponse({ error: '文件名只允许字母、数字、点、下划线、连字符（≤200 字符，不能以点开头）' }, 400);
+  const moveDir = String(body.dir || '');
+  if (!name && !moveDir) {
+    return jsonResponse({ error: '缺少参数：name（改名）或 dir（移动目录）至少提供一个' }, 400);
   }
-  const newKey = key.slice(0, key.lastIndexOf('/') + 1) + name;
+  if (name && !validName(name)) {
+    return jsonResponse({ error: '文件名只允许中文、字母、数字、点、下划线、连字符（≤200 字符，不能以点开头）' }, 400);
+  }
+  if (moveDir && !MOVE_DIRS.includes(moveDir)) {
+    return jsonResponse({ error: '目标目录非法（仅支持 img / video / other）' }, 400);
+  }
+  // 移动目录：保留日期路径，只替换 upweb/ 后的第一级目录；改名：替换最后一段（可叠加）
+  let newKey = key;
+  if (moveDir) {
+    const parts = key.split('/');
+    if (parts.length < 3) {
+      return jsonResponse({ error: '对象路径结构非法，无法移动' }, 400);
+    }
+    parts[1] = moveDir;
+    newKey = parts.join('/');
+  }
+  if (name) {
+    newKey = newKey.slice(0, newKey.lastIndexOf('/') + 1) + name;
+  }
   if (!validMpKey(newKey)) {
     return jsonResponse({ error: '新文件名不合法' }, 400);
   }
@@ -426,8 +459,8 @@ function xmlEscape(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
-// key 白名单：upweb/ 前缀 + 安全字符集（字母数字 . _ - /），禁 .. 与引号/尖括号等可注入字符
-const KEY_RE = /^upweb\/[A-Za-z0-9._\/-]+$/;
+// key 白名单：upweb/ 前缀 + 安全字符集（字母数字 / 中文 / . _ - /），禁 .. 与引号/尖括号等可注入字符
+const KEY_RE = /^upweb\/[A-Za-z0-9._\/\-一-鿿㐀-䶿]+$/;
 function validMpKey(key) {
   return typeof key === 'string' && key.length <= 512 && KEY_RE.test(key) && !key.includes('..');
 }
@@ -512,7 +545,17 @@ async function handleMultipart(request, env) {
         return jsonResponse({ error: `文件大小超限（上限 ${maxMB}MB）` }, 400);
       }
       const mime = String(body.mime || 'application/octet-stream').slice(0, 100) || 'application/octet-stream';
-      const key = makeObjectKey(body.filename || 'file.bin');
+      const key = makeObjectKey(body.filename || 'file.bin', body.keepName === true);
+      // 保留原文件名时做存在性预检（InitMultipart 不带 forbid-overwrite，合并时会静默覆盖同名对象）；
+      // 需要 RAM 授权 oss:GetObject。随机 UUID key 几乎不可能碰撞，跳过预检省一次请求。
+      if (body.keepName === true) {
+        try {
+          await ossRequest(env, 'GET', key, '?objectMeta', '', null);
+          return jsonResponse({ error: `同名文件已存在：${key.split('/').pop()}（请先重命名或删除旧文件）`, code: 'CONFLICT' }, 409);
+        } catch (e) {
+          if (!/NoSuchKey|404|NoSuchObject/.test(e.message)) throw e;
+        }
+      }
       const xml = await ossRequest(env, 'POST', key, '?uploads', mime, null);
       const uploadId = (xml.match(/<UploadId>([^<]+)<\/UploadId>/) || [])[1];
       if (!uploadId) throw new Error('OSS 未返回 UploadId');
@@ -652,7 +695,7 @@ async function handleSign(request, env) {
     return jsonResponse({ error: `文件大小超限（上限 ${maxMB}MB）` }, 400);
   }
 
-  const objectKey = makeObjectKey(body.filename || 'file.bin');
+  const objectKey = makeObjectKey(body.filename || 'file.bin', body.keepName === true);
   const policy = btoa(JSON.stringify({
     expiration: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
     conditions: [
@@ -674,9 +717,135 @@ async function handleSign(request, env) {
       signature,
       'x-oss-forbid-overwrite': 'true',
     },
-    url: `${env.PUBLIC_URL_BASE.replace(/\/$/, '')}/${objectKey}`,
+    url: `${env.PUBLIC_URL_BASE.replace(/\/$/, '')}/${encodeKeyPath(objectKey)}`,
     dir: objectKey.split('/').slice(0, 2).join('/'),
   });
+}
+
+// ================= PicGo / 第三方客户端兼容上传（POST /api/upload） =================
+// 接收 multipart/form-data 文件，服务端签名后直接 PutObject 写入 OSS，返回 PicGo 兼容 JSON。
+// 鉴权（任一）：Authorization: Bearer <密码或令牌> / x-yunwo-password 头 / 表单 password 或 auth 字段。
+// PicGo 配置：API 地址 https://你的域名/api/upload，POST 参数名 file，返回 JSON 路径 data.url，
+//   自定义请求头 {"Authorization":"Bearer 你的上传密码"}。
+// 默认保留原文件名（表单 keepname=0/false 关闭）；同名冲突返回 409，绝不静默覆盖。
+// 注意：文件内容会读入 Worker 内存，MAX_SIZE_MB 勿超过平台请求体限制。
+
+function picgoOk(url, key, name, size) {
+  return jsonResponse({ success: true, code: 200, message: 'ok', result: [url], data: { url, key, name, size } });
+}
+function picgoErr(message, status) {
+  return jsonResponse({ success: false, code: status, message, error: message }, status);
+}
+
+// 服务端签名 PutObject（V1 Header 签名）+ 签名自愈重试一次；x-oss-forbid-overwrite 写死
+async function putObject(env, key, bytes, contentType) {
+  const bucket = env.OSS_BUCKET;
+  const endpoint = env.OSS_ENDPOINT;
+  const url = `https://${bucket}.${endpoint}/${encodeKeyPath(key)}`;
+  const date = new Date().toUTCString();
+  // x-oss- 头按名称字典序进入待签串：x-oss-date < x-oss-forbid-overwrite
+  const myStringToSign = `PUT\n\n${contentType}\n\nx-oss-date:${date}\nx-oss-forbid-overwrite:true\n/${bucket}/${key}`;
+  const headers = {
+    'x-oss-date': date,
+    'x-oss-forbid-overwrite': 'true',
+    'Content-Type': contentType,
+    Authorization: `OSS ${env.OSS_ACCESS_KEY_ID}:${await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, myStringToSign)}`,
+  };
+  let r = await fetch(url, { method: 'PUT', headers, body: bytes });
+  let xml = await r.text();
+  if (!r.ok) {
+    const code = (xml.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
+    const ossString = (xml.match(/<StringToSign>([\s\S]*?)<\/StringToSign>/) || [])[1];
+    if (code === 'SignatureDoesNotMatch' && ossString) {
+      const ossStr = xmlUnescape(ossString);
+      headers.Authorization = `OSS ${env.OSS_ACCESS_KEY_ID}:${await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, ossStr)}`;
+      r = await fetch(url, { method: 'PUT', headers, body: bytes });
+      xml = await r.text();
+      if (!r.ok) {
+        const code2 = (xml.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
+        throw new Error(`OSS PUT 请求失败：` + code2);
+      }
+    } else if (code === 'FileAlreadyExists') {
+      const err = new Error('同名文件已存在，请先重命名或删除旧文件');
+      err.code = 'CONFLICT';
+      throw err;
+    } else {
+      throw new Error(`OSS PUT 请求失败：` + code);
+    }
+  }
+}
+
+async function handleUpload(request, env) {
+  const required = ['OSS_ACCESS_KEY_ID', 'OSS_ACCESS_KEY_SECRET', 'OSS_BUCKET', 'OSS_ENDPOINT', 'PUBLIC_URL_BASE'];
+  for (const k of required) {
+    if (!env[k]) return picgoErr(`服务端缺少环境变量 ${k}`, 500);
+  }
+  const cfgErr = authConfigError(env);
+  if (cfgErr) return picgoErr(cfgErr, 500);
+
+  const maxMB = parseInt(env.MAX_SIZE_MB, 10) || 100;
+  const maxSize = maxMB * 1024 * 1024;
+  // Content-Length 快路径：超限直接 413（multipart 开销放宽 2MB）；头不可信时由 file.size 兜底
+  const cl = parseInt(request.headers.get('Content-Length') || '0', 10);
+  if (cl > maxSize + 2 * 1024 * 1024) {
+    return picgoErr(`文件大小超限（上限 ${maxMB}MB）`, 413);
+  }
+  const ct = request.headers.get('Content-Type') || '';
+  if (!ct.toLowerCase().startsWith('multipart/form-data')) {
+    return picgoErr('Content-Type 必须是 multipart/form-data', 400);
+  }
+  let form;
+  try {
+    form = await request.formData();
+  } catch {
+    return picgoErr('表单解析失败', 400);
+  }
+  // 取文件：优先 file 字段（PicGo 默认），否则取第一个文件字段
+  let file = form.get('file');
+  if (!(file instanceof File)) {
+    for (const v of form.values()) {
+      if (v instanceof File) { file = v; break; }
+    }
+  }
+  if (!(file instanceof File) || file.size <= 0) {
+    return picgoErr('未收到文件（表单中需要一个文件字段，推荐命名为 file）', 400);
+  }
+  if (file.size > maxSize) {
+    return picgoErr(`文件大小超限（上限 ${maxMB}MB）`, 413);
+  }
+
+  // 鉴权：请求头优先（Bearer 可为密码或令牌），其次表单字段
+  const creds = { password: '', auth: '' };
+  const m = (request.headers.get('Authorization') || '').match(/^Bearer\s+(.+)$/i);
+  if (m) { creds.password = m[1]; creds.auth = m[1]; }
+  const hdrPwd = request.headers.get('x-yunwo-password');
+  if (hdrPwd) creds.password = hdrPwd;
+  const fPwd = form.get('password');
+  const fAuth = form.get('auth');
+  if (typeof fPwd === 'string' && fPwd) creds.password = fPwd;
+  if (typeof fAuth === 'string' && fAuth) creds.auth = fAuth;
+  if (creds.password.length > 128 || creds.auth.length > 2048) {
+    return picgoErr('鉴权参数非法', 400);
+  }
+  if (!(await verifyAuth(creds, env))) {
+    await new Promise(r => setTimeout(r, 400));
+    return picgoErr('上传密码错误或会话已过期', 401);
+  }
+
+  const kn = String(form.get('keepname') || '').toLowerCase();
+  const keepName = kn !== '0' && kn !== 'false';
+  const key = makeObjectKey(file.name || 'file.bin', keepName);
+
+  try {
+    const bytes = await file.arrayBuffer();
+    const mime = (file.type || 'application/octet-stream').slice(0, 100);
+    await putObject(env, key, bytes, mime);
+    const url = `${env.PUBLIC_URL_BASE.replace(/\/$/, '')}/${encodeKeyPath(key)}`;
+    return picgoOk(url, key, file.name, file.size);
+  } catch (e) {
+    if (e.code === 'CONFLICT') return picgoErr(e.message, 409);
+    return picgoErr(e.message, 502);
+  }
 }
 
 export default {
@@ -688,6 +857,7 @@ export default {
     if (url.pathname === '/api/delete' && request.method === 'POST') return handleDelete(request, env);
     if (url.pathname === '/api/rename' && request.method === 'POST') return handleRename(request, env);
     if (url.pathname === '/api/multipart' && request.method === 'POST') return handleMultipart(request, env);
-    return jsonResponse({ error: 'Not Found. 接口：POST /api/sign、POST /api/list、POST /api/delete、POST /api/rename、POST /api/multipart。' }, 404);
+    if (url.pathname === '/api/upload' && request.method === 'POST') return handleUpload(request, env);
+    return jsonResponse({ error: 'Not Found. 接口：POST /api/sign、POST /api/list、POST /api/delete、POST /api/rename、POST /api/multipart、POST /api/upload。' }, 404);
   },
 };
