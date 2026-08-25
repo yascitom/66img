@@ -246,6 +246,7 @@
     border-radius:10px;padding:9px 18px;font-size:13px;cursor:pointer;transition:.2s;
   }
   .lb-ops button:hover{border-color:var(--border-hover);background:var(--w10)}
+  .lb-ops button:disabled{opacity:.6;cursor:wait}
   .lb-ops .danger{color:var(--err)}
   .lb-ops .danger:hover{border-color:rgba(240,100,90,.5);background:rgba(240,100,90,.1)}
   .lb-ops .danger.confirm{background:var(--err);color:#fff;border-color:var(--err)}
@@ -384,6 +385,7 @@
       <button id="lbCopy">复制链接</button>
       <button id="lbCopyMd">复制 Markdown</button>
       <button id="lbOpen" style="display:none">打开 / 下载</button>
+      <button id="lbDownload">下载</button>
       <button id="lbDelete" class="danger">删除</button>
       <button id="lbClose">关闭</button>
     </div>
@@ -413,7 +415,7 @@
     <input type="file" id="fileInput" multiple style="display:none">
 
     <div class="settings">
-      <label class="switch"><input type="checkbox" id="webpToggle" checked> 图片智能压缩为 WebP</label>
+      <label class="switch"><input type="checkbox" id="webpToggle"> 图片智能压缩为 WebP（默认关闭，原图直传）</label>
       <label>画质 <input type="range" id="quality" min="10" max="100" value="82"> <span id="qualityVal">82</span>%</label>
     </div>
 
@@ -694,6 +696,7 @@
     bar.style.width=pct+'%';
   }
 
+  // 图片压缩（默认关闭，原图直传；GIF / SVG 任何时候都不压缩，保留动图与矢量特性）
   function maybeCompress(file){
     return new Promise(resolve=>{
       if(!webpToggle.checked || !file.type.startsWith('image/') || file.type==='image/gif' || file.type==='image/svg+xml') return resolve(file);
@@ -1070,6 +1073,27 @@
   $('lbCopy').addEventListener('click',()=>{ if(lbCurrent){ navigator.clipboard.writeText(lbCurrent.url); toast('链接已复制','ok'); } });
   $('lbCopyMd').addEventListener('click',()=>{ if(lbCurrent){ navigator.clipboard.writeText('![img]('+lbCurrent.url+')'); toast('Markdown 已复制','ok'); } });
   $('lbOpen').addEventListener('click',()=>{ if(lbCurrent) window.open(lbCurrent.url,'_blank','noopener,noreferrer'); });
+  // 下载：地址即 PUBLIC_URL_BASE 前缀的直链；先 fetch 成 Blob 本地另存（保留原文件名），跨域受限则退回新标签页打开
+  $('lbDownload').addEventListener('click',async ()=>{
+    if(!lbCurrent) return;
+    const name=lbCurrent.key.split('/').pop();
+    const btn=$('lbDownload'); btn.disabled=true; btn.textContent='下载中…';
+    try{
+      const r=await fetch(lbCurrent.url);
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      const blob=await r.blob();
+      const u=URL.createObjectURL(blob);
+      const a=document.createElement('a');
+      a.href=u; a.download=name; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(()=>URL.revokeObjectURL(u),4000);
+      toast('已开始下载：'+name,'ok');
+    }catch(e){
+      window.open(lbCurrent.url,'_blank','noopener,noreferrer');
+      toast('浏览器拦截了直接下载，已在新标签页打开','err');
+    }finally{
+      btn.disabled=false; btn.textContent='下载';
+    }
+  });
 
   function resetDeleteBtn(){
     const b=$('lbDelete');
