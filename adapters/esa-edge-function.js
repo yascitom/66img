@@ -1,6 +1,6 @@
 // ============================================================
 // OSS 直传签名 —— 阿里云 ESA 边缘函数（Edge Routine）版
-// 路由：POST /api/sign、POST /api/list、POST /api/delete、POST /api/multipart（大文件分片上传）
+// 路由：POST /api/sign、POST /api/list、POST /api/delete、POST /api/rename、POST /api/multipart（大文件分片上传）
 // 部署：ESA 控制台 → 边缘函数 → 新建函数 → 粘贴本文件 → 发布 →
 //       在「函数路由/域名关联」中把你的管理站点域名关联到本函数
 // 注意：ESA 边缘函数若不支持控制台环境变量，直接在下方 CONFIG 里填写即可
@@ -344,6 +344,94 @@ async function handleDelete(request) {
   }
 }
 
+// OSS CopyObject（同桶复制，重命名前半步）
+// StringToSign = PUT\n\n\n\nx-oss-copy-source:<src>\nx-oss-date:<date>\nx-oss-forbid-overwrite:true\n/<bucket>/<newKey>
+// x-oss-forbid-overwrite:true —— 目标已存在则拒绝，防止改名覆盖掉别的文件
+async function copyObject(oldKey, newKey) {
+  const bucket = getEnv('OSS_BUCKET');
+  const endpoint = getEnv('OSS_ENDPOINT');
+  const enc = k => k.split('/').map(encodeURIComponent).join('/');
+  const url = `https://${bucket}.${endpoint}/${enc(newKey)}`;
+  const copySource = '/' + bucket + '/' + enc(oldKey);
+  const date = new Date().toUTCString();
+  const myStringToSign = 'PUT\n\n\n\n'
+    + 'x-oss-copy-source:' + copySource + '\n'
+    + 'x-oss-date:' + date + '\n'
+    + 'x-oss-forbid-overwrite:true\n'
+    + '/' + bucket + '/' + newKey;
+  const headers = {
+    'x-oss-copy-source': copySource,
+    'x-oss-date': date,
+    'x-oss-forbid-overwrite': 'true',
+    Authorization: `OSS ${getEnv('OSS_ACCESS_KEY_ID')}:${await hmacSha1Base64(getEnv('OSS_ACCESS_KEY_SECRET'), myStringToSign)}`,
+  };
+  let r = await fetch(url, { method: 'PUT', headers });
+  if (!r.ok) {
+    const xml = await r.text();
+    const code = (xml.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
+    if (code === 'FileAlreadyExists') { const e = new Error('目标文件名已存在，请换一个名字'); e.code = 'CONFLICT'; throw e; }
+    const ossString = (xml.match(/<StringToSign>([\s\S]*?)<\/StringToSign>/) || [])[1];
+    if (code === 'SignatureDoesNotMatch' && ossString) {
+      const ossStr = xmlUnescape(ossString);
+      headers.Authorization = `OSS ${getEnv('OSS_ACCESS_KEY_ID')}:${await hmacSha1Base64(getEnv('OSS_ACCESS_KEY_SECRET'), ossStr)}`;
+      r = await fetch(url, { method: 'PUT', headers });
+      if (!r.ok) {
+        const code2 = ((await r.text()).match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
+        if (code2 === 'FileAlreadyExists') { const e = new Error('目标文件名已存在，请换一个名字'); e.code = 'CONFLICT'; throw e; }
+        throw new Error('OSS 复制失败：' + code2);
+      }
+    } else {
+      throw new Error('OSS 复制失败：' + code);
+    }
+  }
+}
+
+// 新文件名校验：与全站一致的 ASCII 安全字符集（保证改名后仍可被 list/delete 正常处理）
+const NAME_RE = /^[A-Za-z0-9._-]+$/;
+function validName(name) {
+  return typeof name === 'string' && name.length <= 200 && NAME_RE.test(name)
+    && !name.startsWith('.') && !name.includes('..');
+}
+
+// OSS 重命名 = CopyObject（同桶复制到新 key）+ DeleteObject（删旧 key）
+async function handleRename(request) {
+  const required = ['OSS_ACCESS_KEY_ID', 'OSS_ACCESS_KEY_SECRET', 'OSS_BUCKET', 'OSS_ENDPOINT', 'PUBLIC_URL_BASE'];
+  for (const k of required) {
+    if (!getEnv(k)) return jsonResponse({ error: `服务端缺少配置 ${k}` }, 500);
+  }
+  const cfgErr = authConfigError();
+  if (cfgErr) return jsonResponse({ error: cfgErr }, 500);
+  const { body, err } = await readJsonBody(request, MAX_BODY_BYTES);
+  if (err) return err;
+  const inputErr = badInput(body);
+  if (inputErr) return jsonResponse({ error: inputErr }, 400);
+  if (!(await verifyAuth(body))) {
+    return rejectAuth();
+  }
+  const key = String(body.key || '');
+  if (!validMpKey(key)) {
+    return jsonResponse({ error: '仅允许重命名 upweb/ 前缀下的文件' }, 400);
+  }
+  const name = String(body.name || '').trim();
+  if (!validName(name)) {
+    return jsonResponse({ error: '文件名只允许字母、数字、点、下划线、连字符（≤200 字符，不能以点开头）' }, 400);
+  }
+  const newKey = key.slice(0, key.lastIndexOf('/') + 1) + name;
+  if (!validMpKey(newKey)) {
+    return jsonResponse({ error: '新文件名不合法' }, 400);
+  }
+  if (newKey === key) {
+    return jsonResponse({ ok: true, key, url: getEnv('PUBLIC_URL_BASE').replace(/\/$/, '') + '/' + newKey.split('/').map(encodeURIComponent).join('/') });
+  }
+  try {
+    await copyObject(key, newKey);
+    await deleteObject(key);
+    return jsonResponse({ ok: true, key: newKey, oldKey: key, url: getEnv('PUBLIC_URL_BASE').replace(/\/$/, '') + '/' + newKey.split('/').map(encodeURIComponent).join('/') });
+  } catch (e) {
+    return jsonResponse({ error: e.message }, e.code === 'CONFLICT' ? 409 : 502);
+  }
+}
+
 async function handleSign(request) {
   const required = ['OSS_ACCESS_KEY_ID', 'OSS_ACCESS_KEY_SECRET', 'OSS_BUCKET', 'OSS_ENDPOINT', 'PUBLIC_URL_BASE'];
   for (const k of required) {
@@ -614,8 +702,9 @@ async function handleRequest(request) {
   if (url.pathname === '/api/sign' && request.method === 'POST') return handleSign(request);
   if (url.pathname === '/api/list' && request.method === 'POST') return handleList(request);
   if (url.pathname === '/api/delete' && request.method === 'POST') return handleDelete(request);
+  if (url.pathname === '/api/rename' && request.method === 'POST') return handleRename(request);
   if (url.pathname === '/api/multipart' && request.method === 'POST') return handleMultipart(request);
-  return jsonResponse({ error: 'Not Found. 接口：POST /api/sign、POST /api/list、POST /api/delete、POST /api/multipart。' }, 404);
+  return jsonResponse({ error: 'Not Found. 接口：POST /api/sign、POST /api/list、POST /api/delete、POST /api/rename、POST /api/multipart。' }, 404);
 }
 
 // ESA 边缘函数入口（Service Worker 风格）
