@@ -3,7 +3,7 @@
   const $=id=>document.getElementById(id);
   const dz=$('dropzone'), fi=$('fileInput'), queue=$('queue');
   const webpToggle=$('webpToggle'), quality=$('quality'), qualityVal=$('qualityVal');
-  const keepNameEl=$('keepName'), copyFmtEl=$('copyFmt'), batchToggle=$('batchToggle'), batchBar=$('batchBar');
+  const keepNameEl=$('keepName'), batchToggle=$('batchToggle'), batchBar=$('batchBar');
   const lockScreen=$('lockScreen'), lockbox=$('lockbox'), lockInput=$('lockInput'), lockBtn=$('lockBtn'), lockErr=$('lockErr');
   const mainApp=$('mainApp');
   const lightbox=$('lightbox'), lbMedia=$('lbMedia'), lbMeta=$('lbMeta');
@@ -188,11 +188,14 @@
   const FMT_KEY='yunwo_copyfmt';
   const FMT_LABEL={url:'链接',md:'Markdown',html:'HTML 代码',bbcode:'BBCode'};
   if(!FMT_LABEL[localStorage.getItem(FMT_KEY)]) localStorage.setItem(FMT_KEY,'url');
-  copyFmtEl.value=localStorage.getItem(FMT_KEY);
-  copyFmtEl.addEventListener('change',()=>localStorage.setItem(FMT_KEY,copyFmtEl.value));
+  let curFmt=localStorage.getItem(FMT_KEY);
+  // 灯箱里的格式按钮：点击即选中该格式并完成复制
+  const lbFmtRow=$('lbFmtRow');
+  function syncFmtBtns(){ [...lbFmtRow.children].forEach(b=>b.classList.toggle('active', b.dataset.fmt===curFmt)); }
+  syncFmtBtns();
   // 按当前格式生成引用文本：图片给嵌入标签，其他类型给普通链接
   function formatLink(f){
-    const fmt=copyFmtEl.value||'url';
+    const fmt=curFmt||'url';
     const name=f.key.split('/').pop();
     const t=f.type||fileTypeOf(f.key);
     if(fmt==='md') return t==='image'?('![img]('+f.url+')'):('['+name+']('+f.url+')');
@@ -303,7 +306,7 @@
         const act=item.el.querySelector('.qact');
         const btn=document.createElement('button');
         btn.className='qbtn primary'; btn.textContent='复制链接';
-        btn.addEventListener('click',()=>copyText(formatLink({url:result.url, key:result.key, type:fileTypeOf(result.key)}), FMT_LABEL[copyFmtEl.value]));
+        btn.addEventListener('click',()=>copyText(formatLink({url:result.url, key:result.key, type:fileTypeOf(result.key)}), FMT_LABEL[curFmt]));
         act.appendChild(btn);
         addHistory(result.url);
         prependCloudItem({key:result.key, time:new Date().toISOString(), size:file.size, url:result.url, type:fileTypeOf(result.key)});
@@ -642,7 +645,7 @@
     if(!selected.size){ toast('请先勾选文件'); return; }
     const kw=($('cloudSearch').value||'').toLowerCase();
     const items=sortItems(cloudItems.filter(f=>selected.has(f.key)&&(!kw||f.key.toLowerCase().includes(kw))));
-    copyText(items.map(formatLink).join('\n'), items.length+' 条'+FMT_LABEL[copyFmtEl.value]);
+    copyText(items.map(formatLink).join('\n'), items.length+' 条'+FMT_LABEL[curFmt]);
   });
   $('batchDelete').addEventListener('click',async ()=>{
     const btn=$('batchDelete');
@@ -789,7 +792,7 @@
       lbMedia.innerHTML='<div class="lb-file"><div class="fico">'+fileIcon(f.key)+'</div><div class="fname">'+escapeHtml(name)+'</div></div>';
       $('lbOpen').style.display='';
     }
-    $('lbCopy').textContent='复制'+({'url':'链接','md':'Markdown','html':'HTML','bbcode':'BBCode'}[copyFmtEl.value]||'链接');
+    $('lbCopy').textContent='复制'+({'url':'链接','md':'Markdown','html':'HTML','bbcode':'BBCode'}[curFmt]||'链接');
     lbMeta.innerHTML=escapeHtml(f.key)+'<br>'+(f.size?fmtSize(f.size)+' · ':'')+(f.time?new Date(f.time).toLocaleString():'');
     resetDeleteBtn();
     lightbox.classList.add('show');
@@ -803,7 +806,16 @@
   $('lbClose').addEventListener('click',closeLightbox);
   lightbox.addEventListener('click',e=>{ if(e.target===lightbox) closeLightbox(); });
   window.addEventListener('keydown',e=>{ if(e.key==='Escape'){ closeQr(); closeLightbox(); } });
-  $('lbCopy').addEventListener('click',()=>{ if(lbCurrent) copyText(formatLink(lbCurrent), FMT_LABEL[copyFmtEl.value]); });
+  $('lbCopy').addEventListener('click',()=>{ if(lbCurrent) copyText(formatLink(lbCurrent), FMT_LABEL[curFmt]); });
+  // 格式按钮：选中格式、记住选择，并立即按该格式复制当前文件
+  lbFmtRow.addEventListener('click',e=>{
+    const b=e.target.closest('.fmt-btn');
+    if(!b||!lbCurrent) return;
+    curFmt=b.dataset.fmt; localStorage.setItem(FMT_KEY,curFmt);
+    syncFmtBtns();
+    $('lbCopy').textContent='复制'+({'url':'链接','md':'Markdown','html':'HTML','bbcode':'BBCode'}[curFmt]||'链接');
+    copyText(formatLink(lbCurrent), FMT_LABEL[curFmt]);
+  });
 
   // ================= 分享二维码（本地生成，不经任何第三方服务，直链不出本机） =================
   const qrModal=$('qrModal');
@@ -945,7 +957,7 @@
       else if(t==='video') d.innerHTML='<div class="ftile"><div class="fico">🎬</div><div class="fext">video</div></div>';
       else d.innerHTML='<div class="ftile"><div class="fico">'+fileIcon(it.url)+'</div><div class="fext">'+escapeHtml((it.url.split('.').pop()||'file').slice(0,6))+'</div></div>';
       d.innerHTML+='<div class="mask"><span>点击复制链接</span></div>';
-      d.addEventListener('click',()=>copyText(formatLink({url:it.url, key:it.url.split('?')[0].split('/').map(decodeURIComponent).join('/'), type:t}), FMT_LABEL[copyFmtEl.value]));
+      d.addEventListener('click',()=>copyText(formatLink({url:it.url, key:it.url.split('?')[0].split('/').map(decodeURIComponent).join('/'), type:t}), FMT_LABEL[curFmt]));
       list.appendChild(d);
     });
   }

@@ -287,6 +287,15 @@ input[type=range]{accent-color:var(--accent);width:110px;vertical-align:middle}
 .lb-ops .danger:hover{border-color:rgba(240,100,90,.5);background:rgba(240,100,90,.1)}
 .lb-ops .danger.confirm{background:var(--err);color:#fff;border-color:var(--err)}
 
+/* ===== 灯箱多格式复制 ===== */
+.fmt-row{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin:0 0 14px}
+.fmt-btn{
+  border:1px solid var(--border);background:var(--w4);color:var(--muted);
+  border-radius:99px;padding:6px 16px;font-size:12.5px;cursor:pointer;transition:.2s;
+}
+.fmt-btn:hover{color:var(--text);border-color:var(--border-hover)}
+.fmt-btn.active{background:var(--grad);color:#fff;border-color:transparent;box-shadow:0 2px 10px rgba(110,155,255,.35)}
+
 /* ===== Toast ===== */
 #toasts{position:fixed;top:22px;left:50%;transform:translateX(-50%);z-index:200;display:flex;flex-direction:column;gap:8px;align-items:center;pointer-events:none}
 .toast{

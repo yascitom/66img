@@ -41,6 +41,12 @@
       <button class="mini-btn" id="lbRenameOk">确定</button>
       <button class="mini-btn" id="lbRenameCancel">取消</button>
     </div>
+    <div class="fmt-row" id="lbFmtRow">
+      <button class="fmt-btn" data-fmt="url">URL 直链</button>
+      <button class="fmt-btn" data-fmt="md">Markdown</button>
+      <button class="fmt-btn" data-fmt="html">HTML</button>
+      <button class="fmt-btn" data-fmt="bbcode">BBCode</button>
+    </div>
     <div class="lb-ops">
       <button id="lbCopy">复制链接</button>
       <button id="lbQr">二维码</button>
@@ -102,12 +108,6 @@
     <div class="sec-title">
       <span>云端文件 <span class="count-tag" id="cloudCount"></span></span>
       <div class="ops">
-        <select class="sortsel" id="copyFmt" title="复制链接格式">
-          <option value="url">URL 直链</option>
-          <option value="md">Markdown</option>
-          <option value="html">HTML</option>
-          <option value="bbcode">BBCode</option>
-        </select>
         <button class="mini-btn" id="batchToggle" title="批量管理">☑ 批量</button>
         <div class="viewswitch" id="viewSwitch">
           <button class="viewbtn active" data-view="grid" title="平铺">▦</button>
