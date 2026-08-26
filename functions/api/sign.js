@@ -70,9 +70,13 @@ function authConfigError(env) {
   return '';
 }
 
-// base64url 编解码（payload 均为 ASCII，可直接 btoa/atob）
+// base64url 编码（入参为 Latin-1 字节串，如 HMAC 签名；含中日韩的 JSON 请用 b64urlJsonEncode）
 function b64urlEncode(s) { return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
-function b64urlDecode(s) { return atob(s.replace(/-/g, '+').replace(/_/g, '/')); }
+
+// UTF-8 安全 base64：btoa 只接受 Latin-1，含中日韩等字符的字符串需先按 UTF-8 转字节再编码
+function b64utf8(s) {
+  return btoa(String.fromCharCode(...new TextEncoder().encode(s)));
+}
 
 // HMAC-SHA256 → base64url（Web Crypto）
 async function hmacSha256B64url(secret, message) {
@@ -83,8 +87,16 @@ async function hmacSha256B64url(secret, message) {
 }
 
 // 签发令牌：base64url(payload JSON) + '.' + 签名；密钥为派生密钥（见 tokenKey）
+// payload 可能含中日韩 key，JSON 编解码须走 UTF-8 字节（btoa/atob 只认 Latin-1）
+function b64urlJsonEncode(o) {
+  return b64urlEncode(String.fromCharCode(...new TextEncoder().encode(JSON.stringify(o))));
+}
+function b64urlJsonDecode(s) {
+  const bin = atob(s.replace(/-/g, '+').replace(/_/g, '/'));
+  return JSON.parse(new TextDecoder().decode(Uint8Array.from(bin, c => c.charCodeAt(0))));
+}
 async function makeToken(payload, secret) {
-  const body = b64urlEncode(JSON.stringify(payload));
+  const body = b64urlJsonEncode(payload);
   return body + '.' + (await hmacSha256B64url(secret, body));
 }
 
@@ -96,7 +108,7 @@ async function readToken(token, secret) {
   const body = token.slice(0, i);
   if ((await hmacSha256B64url(secret, body)) !== token.slice(i + 1)) return null;
   try {
-    const p = JSON.parse(b64urlDecode(body));
+    const p = b64urlJsonDecode(body);
     if (!p || typeof p.e !== 'number' || p.e < Math.floor(Date.now() / 1000)) return null;
     return p;
   } catch { return null; }
@@ -249,7 +261,7 @@ async function handle(request, env) {
       ['eq', '$x-oss-forbid-overwrite', 'true'],
     ],
   };
-  const policy = btoa(JSON.stringify(policyObj));
+  const policy = b64utf8(JSON.stringify(policyObj));
   const signature = await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, policy);
 
   return jsonResponse({
