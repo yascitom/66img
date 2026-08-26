@@ -443,3 +443,10 @@ html[data-theme=light] .gitem .selbox{background:rgba(255,255,255,.82);border-co
   #batchCount{flex-basis:100%;margin-right:0}
   #qrImg{width:190px;height:190px}
 }
+
+/* 触屏设备文本输入框字号提到 16px：
+   iOS Safari/Chrome 聚焦 font-size<16px 的输入框时会自动放大页面，
+   造成"搜索框溢出屏幕"的错觉和横向滚动。鼠标设备视觉保持不变。 */
+@media (pointer:coarse){
+  .searchbox input,.lockbox input,.rename-row input,.linkrow input{font-size:16px}
+}
