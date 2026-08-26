@@ -175,7 +175,7 @@ async function readJsonBody(request, cap) {
 }
 
 // key 白名单：upweb/ 前缀 + 安全字符集（字母数字 . _ - /），禁 .. 与可注入字符
-const KEY_RE = /^upweb\/[A-Za-z0-9._\/\-一-鿿㐀-䶿]+$/; // 允许中文文件名（与 sign/rename 一致）
+const KEY_RE = /^upweb\/[A-Za-z0-9._\/\-一-鿿㐀-䶿가-힯ㄱ-ㅣ぀-ヿ]+$/; // 允许中日韩文件名（与 sign/rename 一致）
 function validKey(key) {
   return typeof key === 'string' && key.length <= 512 && KEY_RE.test(key) && !key.includes('..');
 }

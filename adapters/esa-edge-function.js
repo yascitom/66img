@@ -190,11 +190,11 @@ function rejectSession() {
 const IMG_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'avif', 'bmp', 'ico', 'tiff'];
 const VIDEO_EXTS = ['mp4', 'webm', 'mov', 'mkv', 'm4v', 'avi', 'flv', 'ts'];
 
-// 文件主体名清洗：保留中文 / 字母数字 / . _ -，其余替换为 -，最长 80 字符
+// 文件主体名清洗：保留中日韩文字 / 字母数字 / . _ -，其余替换为 -，最长 80 字符
 function sanitizeBaseName(filename) {
   let base = String(filename).replace(/\.[^.]*$/, ''); // 去掉最后一个扩展名
   base = base.replace(/[\/\\]/g, '-');
-  base = base.replace(/[^A-Za-z0-9._\-一-鿿㐀-䶿]/g, '-'); // 一-鿿 = CJK 基本区，㐀-䶿 = 扩展 A 区
+  base = base.replace(/[^A-Za-z0-9._\-一-鿿㐀-䶿가-힯ㄱ-ㅣ぀-ヿ]/g, '-'); // 一-鿿 = CJK 基本区，㐀-䶿 = 扩展 A 区，가-힯 = 韩文音节，ㄱ-ㅣ = 韩文兼容字母，぀-ヿ = 日文假名
   base = base.replace(/-{2,}/g, '-').replace(/^[.\-]+|[.\-]+$/g, '');
   if (base.length > 80) base = base.slice(0, 80).replace(/[.\-]+$/, '');
   return base;
@@ -399,7 +399,7 @@ async function copyObject(oldKey, newKey) {
 }
 
 // 新文件名校验：与全站一致的安全字符集（中文 / 字母数字 / . _ -，保证改名后仍可被 list/delete 正常处理）
-const NAME_RE = /^[A-Za-z0-9._\-一-鿿㐀-䶿]+$/;
+const NAME_RE = /^[A-Za-z0-9._\-一-鿿㐀-䶿가-힯ㄱ-ㅣ぀-ヿ]+$/;
 // 可移动的目标目录（与前端目录标签一致）
 const MOVE_DIRS = ['img', 'video', 'other'];
 function validName(name) {
@@ -432,7 +432,7 @@ async function handleRename(request) {
     return jsonResponse({ error: '缺少参数：name（改名）或 dir（移动目录）至少提供一个' }, 400);
   }
   if (name && !validName(name)) {
-    return jsonResponse({ error: '文件名只允许中文、字母、数字、点、下划线、连字符（≤200 字符，不能以点开头）' }, 400);
+    return jsonResponse({ error: '文件名只允许中日韩文字、字母、数字、点、下划线、连字符（≤200 字符，不能以点开头）' }, 400);
   }
   if (moveDir && !MOVE_DIRS.includes(moveDir)) {
     return jsonResponse({ error: '目标目录非法（仅支持 img / video / other）' }, 400);
@@ -665,7 +665,7 @@ function xmlEscape(s) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 // key 白名单：upweb/ 前缀 + 安全字符集（字母数字 . _ - /），禁 .. 与引号/尖括号等可注入字符
-const KEY_RE = /^upweb\/[A-Za-z0-9._\/\-一-鿿㐀-䶿]+$/; // 允许中文文件名（与 sign/rename 一致）
+const KEY_RE = /^upweb\/[A-Za-z0-9._\/\-一-鿿㐀-䶿가-힯ㄱ-ㅣ぀-ヿ]+$/; // 允许中日韩文件名（与 sign/rename 一致）
 function validMpKey(key) {
   return typeof key === 'string' && key.length <= 512 && KEY_RE.test(key) && !key.includes('..');
 }

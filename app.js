@@ -853,8 +853,8 @@
     if(!lbCurrent) return;
     const name=lbRenameInput.value.trim();
     // 与服务端一致的白名单校验：中文 / 字母数字 / 点 / 下划线 / 连字符，保证改名后 list/delete 仍正常
-    if(!/^[A-Za-z0-9._\-一-鿿㐀-䶿]+$/.test(name) || name.startsWith('.') || name.includes('..') || name.length>200){
-      toast('文件名只允许中文、字母、数字、点、下划线、连字符','err'); return;
+    if(!/^[A-Za-z0-9._\-一-鿿㐀-䶿가-힯ㄱ-ㅣ぀-ヿ]+$/.test(name) || name.startsWith('.') || name.includes('..') || name.length>200){
+      toast('文件名只允许中日韩文字、字母、数字、点、下划线、连字符','err'); return;
     }
     const oldKey=lbCurrent.key;
     if(name===oldKey.split('/').pop()){ closeRename(); return; }

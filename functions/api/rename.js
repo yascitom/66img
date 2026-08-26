@@ -222,14 +222,14 @@ async function readJsonBody(request, cap) {
 }
 
 // key 白名单：upweb/ 前缀 + 安全字符集（字母数字 / 中文 / . _ - /），禁 .. 与可注入字符
-const KEY_RE = /^upweb\/[A-Za-z0-9._\/\-一-鿿㐀-䶿]+$/;
+const KEY_RE = /^upweb\/[A-Za-z0-9._\/\-一-鿿㐀-䶿가-힯ㄱ-ㅣ぀-ヿ]+$/;
 function validKey(key) {
   return typeof key === 'string' && key.length <= 512 && KEY_RE.test(key) && !key.includes('..');
 }
 
 // 新文件名校验：与全站一致的安全字符集（中文 / 字母数字 / . _ -，保证改名后仍可被 list/delete 正常处理）；
 // 不允许以 . 开头、不允许纯点、不允许带目录分隔符
-const NAME_RE = /^[A-Za-z0-9._\-一-鿿㐀-䶿]+$/;
+const NAME_RE = /^[A-Za-z0-9._\-一-鿿㐀-䶿가-힯ㄱ-ㅣ぀-ヿ]+$/;
 function validName(name) {
   return typeof name === 'string' && name.length <= 200 && NAME_RE.test(name)
     && !name.startsWith('.') && !name.includes('..');
@@ -271,7 +271,7 @@ async function handle(request, env) {
     return jsonResponse({ error: '缺少参数：name（改名）或 dir（移动目录）至少提供一个' }, 400);
   }
   if (name && !validName(name)) {
-    return jsonResponse({ error: '文件名只允许中文、字母、数字、点、下划线、连字符（≤200 字符，不能以点开头）' }, 400);
+    return jsonResponse({ error: '文件名只允许中日韩文字、字母、数字、点、下划线、连字符（≤200 字符，不能以点开头）' }, 400);
   }
   if (moveDir && !MOVE_DIRS.includes(moveDir)) {
     return jsonResponse({ error: '目标目录非法（仅支持 img / video / other）' }, 400);

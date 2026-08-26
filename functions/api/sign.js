@@ -161,12 +161,12 @@ async function readJsonBody(request, cap) {
 const IMG_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'avif', 'bmp', 'ico', 'tiff'];
 const VIDEO_EXTS = ['mp4', 'webm', 'mov', 'mkv', 'm4v', 'avi', 'flv', 'ts'];
 
-// 文件主体名清洗：保留中文 / 字母数字 / . _ -，其余字符替换为 -，折叠重复、去首尾点与连字符，
+// 文件主体名清洗：保留中日韩文字 / 字母数字 / . _ -，其余字符替换为 -，折叠重复、去首尾点与连字符，
 // 最长 80 字符。与 delete/rename/multipart/upload 的 KEY_RE / NAME_RE 白名单保持一致。
 function sanitizeBaseName(filename) {
   let base = String(filename).replace(/\.[^.]*$/, ''); // 去掉最后一个扩展名
   base = base.replace(/[\/\\]/g, '-');
-  base = base.replace(/[^A-Za-z0-9._\-一-鿿㐀-䶿]/g, '-'); // 一-鿿 = CJK 基本区，㐀-䶿 = 扩展 A 区
+  base = base.replace(/[^A-Za-z0-9._\-一-鿿㐀-䶿가-힯ㄱ-ㅣ぀-ヿ]/g, '-'); // 一-鿿 = CJK 基本区，㐀-䶿 = 扩展 A 区，가-힯 = 韩文音节，ㄱ-ㅣ = 韩文兼容字母，぀-ヿ = 日文假名
   base = base.replace(/-{2,}/g, '-').replace(/^[.\-]+|[.\-]+$/g, '');
   if (base.length > 80) base = base.slice(0, 80).replace(/[.\-]+$/, '');
   return base;

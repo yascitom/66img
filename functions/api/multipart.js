@@ -57,11 +57,11 @@ function xmlEscape(s) {
 const IMG_EXTS = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'avif', 'bmp', 'ico', 'tiff'];
 const VIDEO_EXTS = ['mp4', 'webm', 'mov', 'mkv', 'm4v', 'avi', 'flv', 'ts'];
 
-// 文件主体名清洗：保留中文 / 字母数字 / . _ -，其余替换为 -，最长 80 字符（与 sign.js 一致）
+// 文件主体名清洗：保留中日韩文字 / 字母数字 / . _ -，其余替换为 -，最长 80 字符（与 sign.js 一致）
 function sanitizeBaseName(filename) {
   let base = String(filename).replace(/\.[^.]*$/, ''); // 去掉最后一个扩展名
   base = base.replace(/[\/\\]/g, '-');
-  base = base.replace(/[^A-Za-z0-9._\-一-鿿㐀-䶿]/g, '-'); // 一-鿿 = CJK 基本区，㐀-䶿 = 扩展 A 区
+  base = base.replace(/[^A-Za-z0-9._\-一-鿿㐀-䶿가-힯ㄱ-ㅣ぀-ヿ]/g, '-'); // 一-鿿 = CJK 基本区，㐀-䶿 = 扩展 A 区，가-힯 = 韩文音节，ㄱ-ㅣ = 韩文兼容字母，぀-ヿ = 日文假名
   base = base.replace(/-{2,}/g, '-').replace(/^[.\-]+|[.\-]+$/g, '');
   if (base.length > 80) base = base.slice(0, 80).replace(/[.\-]+$/, '');
   return base;
@@ -220,7 +220,7 @@ function rejectSession() {
 
 // key 白名单校验：只允许 upweb/ 前缀 + 安全字符集（字母数字 / 中文 / . _ - /），
 // 禁止 .. 和引号/尖括号等可注入字符，杜绝恶意 key 引发的存储型 XSS
-const KEY_RE = /^upweb\/[A-Za-z0-9._\/\-一-鿿㐀-䶿]+$/;
+const KEY_RE = /^upweb\/[A-Za-z0-9._\/\-一-鿿㐀-䶿가-힯ㄱ-ㅣ぀-ヿ]+$/;
 function validKey(key) {
   return typeof key === 'string' && key.length <= 512 && KEY_RE.test(key) && !key.includes('..');
 }
