@@ -22,7 +22,7 @@ html[data-theme=light]{
   --border:var(--w10); --border-hover:var(--w20);
   --text:#1b2233; --muted:#5b657a; --faint:#98a0b3;
   --shadow:0 10px 30px rgba(31,41,66,.10);
-  --overlay:rgba(242,244,250,.9);
+  --overlay:rgba(240,242,248,.96);
   --toast-bg:rgba(255,255,255,.95);
   --w2:rgba(15,23,42,.02); --w3:rgba(15,23,42,.03); --w4:rgba(15,23,42,.04);
   --w5:rgba(15,23,42,.05); --w6:rgba(15,23,42,.06); --w7:rgba(15,23,42,.07);
@@ -410,13 +410,17 @@ footer{margin-top:30px;text-align:center;color:var(--faint);font-size:12px;line-
 #batchCount{font-size:12.5px;color:var(--muted);margin-right:auto}
 .mini-btn.active{background:var(--grad);color:#fff;border-color:transparent}
 .gitem .selbox{
-  position:absolute;top:7px;right:7px;width:22px;height:22px;border-radius:7px;z-index:3;
+  position:absolute;top:7px;right:7px;width:24px;height:24px;border-radius:8px;z-index:3;
   background:rgba(10,12,18,.72);border:1.5px solid rgba(255,255,255,.55);backdrop-filter:blur(4px);
-  display:none;align-items:center;justify-content:center;font-size:13px;color:transparent;line-height:1;
+  display:none;align-items:center;justify-content:center;font-size:14px;font-weight:700;color:transparent;line-height:1;
+  box-shadow:0 1px 5px rgba(0,0,0,.35);
 }
-html[data-theme=light] .gitem .selbox{background:rgba(255,255,255,.82);border-color:rgba(15,23,42,.4)}
+/* 浅色主题：白色底 + 深色描边 + 投影，保证在亮色图片上也清晰可见 */
+html[data-theme=light] .gitem .selbox{background:rgba(255,255,255,.95);border-color:rgba(15,23,42,.45);box-shadow:0 1px 5px rgba(15,23,42,.3)}
 .grid.batch .gitem .selbox{display:flex}
-.gitem.sel .selbox{background:var(--accent);border-color:var(--accent);color:#fff}
+.gitem.sel .selbox{background:var(--grad);border-color:transparent;color:#fff;box-shadow:0 2px 8px rgba(110,155,255,.55)}
+/* 浅色主题选中态：上面那条浅色覆盖优先级更高，会盖掉渐变底，需单独声明 */
+html[data-theme=light] .gitem.sel .selbox{background:var(--grad);border-color:transparent;color:#fff}
 .gitem.sel{border-color:var(--accent);box-shadow:0 0 0 2px rgba(110,155,255,.45)}
 .grid[data-view=list] .gitem .selbox{position:static;flex:none}
 .grid.batch .gitem:hover{transform:none}
