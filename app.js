@@ -641,6 +641,15 @@
     cloudItems.forEach(f=>{ if(!kw || f.key.toLowerCase().includes(kw)) selected.add(f.key); });
     updateBatchBar(); renderCloud($('cloudSearch').value);
   });
+  // 反选：当前筛选范围内，已选的取消、未选的选中
+  $('batchInvert').addEventListener('click',()=>{
+    const kw=($('cloudSearch').value||'').toLowerCase();
+    cloudItems.forEach(f=>{
+      if(kw && !f.key.toLowerCase().includes(kw)) return;
+      if(selected.has(f.key)) selected.delete(f.key); else selected.add(f.key);
+    });
+    updateBatchBar(); renderCloud($('cloudSearch').value);
+  });
   $('batchCopy').addEventListener('click',()=>{
     if(!selected.size){ toast('请先勾选文件'); return; }
     const kw=($('cloudSearch').value||'').toLowerCase();
