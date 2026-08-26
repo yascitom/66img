@@ -286,6 +286,46 @@
     });
   }
 
+  // ================= 同名冲突弹窗 =================
+  // 返回新文件名；点「取消」/遮罩/Esc 返回 null
+  const nameModal=$('nameModal'), nmInput=$('nmInput'), nmName=$('nmName');
+  function randCode6(){
+    const chars='abcdefghijklmnopqrstuvwxyz0123456789';
+    const buf=new Uint8Array(6); crypto.getRandomValues(buf);
+    return [...buf].map(b=>chars[b%36]).join('');
+  }
+  function addConflictSuffix(name){
+    const i=name.lastIndexOf('.');
+    const code=randCode6();
+    return i>0 ? name.slice(0,i)+'-'+code+name.slice(i) : name+'-'+code;
+  }
+  function askConflictName(name){
+    return new Promise(resolve=>{
+      nmName.textContent=name;
+      nmInput.value=name;
+      nameModal.classList.add('show');
+      setTimeout(()=>{ nmInput.focus(); nmInput.select(); },50);
+      const done=v=>{
+        nameModal.classList.remove('show');
+        window.removeEventListener('keydown',onKey,true);
+        resolve(v);
+      };
+      const onKey=e=>{
+        if(e.key==='Escape'){ e.stopPropagation(); done(null); }
+        if(e.key==='Enter'&&document.activeElement===nmInput){ e.stopPropagation(); $('nmRename').click(); }
+      };
+      window.addEventListener('keydown',onKey,true);
+      $('nmRename').onclick=()=>{
+        const v=nmInput.value.trim();
+        if(!v){ toast('文件名不能为空','err'); return; }
+        done(v);
+      };
+      $('nmAuto').onclick=()=>done(addConflictSuffix(nmInput.value.trim()||name));
+      $('nmCancel').onclick=()=>done(null);
+      nameModal.onclick=e=>{ if(e.target===nameModal) done(null); };
+    });
+  }
+
   async function processQueue(){
     uploading=true;
     while(pending.length){
@@ -293,13 +333,26 @@
       queue.appendChild(item.el);
       try{
         setQ(item, 8, fileTypeOf(item.file.name)==='image'?'压缩处理中…':'准备上传…');
-        const file=await maybeCompress(item.file);
+        let file=await maybeCompress(item.file);
 
+        // 同名冲突：弹窗让用户重命名，或自动加 6 位编码后缀重试
         let result;
-        if(file.size>MP_THRESHOLD){
-          result=await uploadMultipart(item, file); // 大文件：分片直传（断点续传）
-        }else{
-          result=await uploadSimple(item, file);    // 小文件：PostObject 表单直传
+        for(;;){
+          try{
+            if(file.size>MP_THRESHOLD){
+              result=await uploadMultipart(item, file); // 大文件：分片直传（断点续传）
+            }else{
+              result=await uploadSimple(item, file);    // 小文件：PostObject 表单直传
+            }
+            break;
+          }catch(e){
+            if(e.code!=='CONFLICT') throw e;
+            setQ(item, 100, '同名文件已存在，等待处理…', 'err');
+            const newName=await askConflictName(file.name);
+            if(newName===null) throw new Error('已取消（同名文件冲突）');
+            file=new File([file], newName, {type:file.type});
+            setQ(item, 8, '以新名称重新上传…');
+          }
         }
 
         setQ(item, 100, '✓ 完成 · '+fmtSize(file.size)+' → '+result.dir, 'ok');
@@ -344,12 +397,15 @@
     let ur=await postToOSS(sign, file);
     if(!ur.ok){
       const t=await ur.text().catch(()=> '');
+      // 同名冲突：x-oss-forbid-overwrite 拒绝，抛 CONFLICT 交给上层弹窗处理
+      if(ur.status===409||/FileAlreadyExists/i.test(t)){ const err=new Error('同名文件已存在'); err.code='CONFLICT'; throw err; }
       // 慢网络可能拖过 Policy 10 分钟有效期：检测到过期就自动重签重传一次
       if(/Policy expired|AccessDenied/i.test(t)){
         setQ(item, 30, '签名已过期，自动重签重传…');
         sign=await getSign(file);
         setQ(item, 60, '重新上传到 OSS…');
         ur=await postToOSS(sign, file);
+        if(ur.status===409){ const err=new Error('同名文件已存在'); err.code='CONFLICT'; throw err; }
       }
     }
     if(!ur.ok) throw new Error('OSS 返回 '+ur.status);

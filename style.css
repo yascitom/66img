@@ -439,6 +439,23 @@ html[data-theme=light] .gitem.sel .selbox{background:var(--grad);border-color:tr
   z-index:95;display:none;align-items:center;justify-content:center;padding:30px;
 }
 #qrModal.show{display:flex;animation:fadein .2s}
+
+/* ===== 同名冲突弹窗 ===== */
+#nameModal{
+  position:fixed;inset:0;background:var(--overlay);backdrop-filter:blur(10px);
+  z-index:96;display:none;align-items:center;justify-content:center;padding:30px;
+}
+#nameModal.show{display:flex;animation:fadein .2s}
+.nm-name{
+  font-size:12.5px;color:var(--muted);font-family:ui-monospace,monospace;
+  word-break:break-all;margin-bottom:16px;line-height:1.6;
+}
+#nmInput{
+  width:100%;background:var(--w5);border:1px solid var(--border);border-radius:10px;
+  color:var(--text);padding:10px 14px;font-size:13px;outline:none;margin-bottom:16px;
+  font-family:ui-monospace,monospace;transition:.2s;
+}
+#nmInput:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(110,155,255,.15)}
 .qr-box{
   background:var(--card-solid);border:1px solid var(--border);border-radius:18px;
   padding:26px 30px;text-align:center;box-shadow:0 20px 60px rgba(0,0,0,.6);
@@ -461,5 +478,5 @@ html[data-theme=light] .gitem.sel .selbox{background:var(--grad);border-color:tr
    iOS Safari/Chrome 聚焦 font-size<16px 的输入框时会自动放大页面，
    造成"搜索框溢出屏幕"的错觉和横向滚动。鼠标设备视觉保持不变。 */
 @media (pointer:coarse){
-  .searchbox input,.lockbox input,.rename-row input,.linkrow input{font-size:16px}
+  .searchbox input,.lockbox input,.rename-row input,.linkrow input,#nmInput{font-size:16px}
 }

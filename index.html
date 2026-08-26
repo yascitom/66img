@@ -72,6 +72,20 @@
   </div>
 </div>
 
+<!-- 同名文件冲突：重命名 或 自动加编码继续 -->
+<div id="nameModal">
+  <div class="qr-box">
+    <div class="qr-title">已存在同名文件</div>
+    <div class="nm-name" id="nmName"></div>
+    <input type="text" id="nmInput" spellcheck="false" maxlength="200" placeholder="输入新文件名（含扩展名）">
+    <div class="lb-ops">
+      <button id="nmRename">重命名上传</button>
+      <button id="nmAuto">加编码继续</button>
+      <button id="nmCancel">取消</button>
+    </div>
+  </div>
+</div>
+
 <div class="wrap" id="mainApp">
   <header>
     <div class="brand">
