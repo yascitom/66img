@@ -74,8 +74,8 @@ header{display:flex;align-items:center;justify-content:space-between;margin-bott
 .card:nth-child(3){animation-delay:.12s}
 .card:nth-child(4){animation-delay:.18s}
 @keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
-.sec-title{font-size:14.5px;font-weight:600;letter-spacing:.3px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;gap:10px}
-.sec-title .ops{display:flex;gap:8px;align-items:center}
+.sec-title{font-size:14.5px;font-weight:600;letter-spacing:.3px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
+.sec-title .ops{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .mini-btn{
   background:var(--w6);border:1px solid var(--border);color:var(--muted);
   border-radius:8px;font-size:12px;padding:6px 12px;cursor:pointer;transition:.2s;white-space:nowrap;
@@ -368,8 +368,6 @@ footer{margin-top:30px;text-align:center;color:var(--faint);font-size:12px;line-
   .brand h1{font-size:18px}
   .brand small{font-size:11px}
   .headbtn{padding:7px 11px;font-size:12px}
-  .sec-title{flex-wrap:wrap}
-  .sec-title .ops{flex-wrap:wrap}
   .searchbox{max-width:none;flex:1 1 100%;order:8}
   .tabs{gap:6px}
   .tab{padding:6px 13px;font-size:12px}
