@@ -62,11 +62,9 @@ async function deleteObject(env, key) {
       if (!r.ok && r.status !== 204) {
         const xml2 = await r.text();
         const code2 = (xml2.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
-        throw new Error(
-          'OSS 删除失败：' + code2 +
-          '（已按 OSS 签名串重试仍失败）｜OSS期望[' + ossStr.replace(/\n/g, '⏎') +
-          ']｜我方[' + myStringToSign.replace(/\n/g, '⏎') + ']'
-        );
+        // 签名排障细节（双方 StringToSign）只进平台日志，不进响应体
+        console.error('OSS 删除重签仍失败：', code2, '｜OSS期望[', ossStr, ']｜我方[', myStringToSign, ']');
+        throw new Error('OSS 删除失败：' + code2);
       }
     } else {
       throw new Error('OSS 删除失败：' + code);

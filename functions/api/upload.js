@@ -191,6 +191,31 @@ async function putObject(env, key, bytes, contentType) {
   }
 }
 
+// ------------------------------------------------------------
+// 带字节硬上限读取请求体：超限即中断流，返回 null。
+// Content-Length 缺失或谎报时也不能超过 cap（M1 防未鉴权大体积消耗）。
+// ------------------------------------------------------------
+async function readBodyCapped(request, cap) {
+  if (!request.body) return new Uint8Array(0);
+  const reader = request.body.getReader();
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > cap) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  const buf = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) { buf.set(c, off); off += c.byteLength; }
+  return buf;
+}
+
 async function handle(request, env) {
   if (request.method !== 'POST') {
     return picgoErr('Method Not Allowed', 405);
@@ -208,22 +233,63 @@ async function handle(request, env) {
   const maxMB = parseInt(env.MAX_SIZE_MB, 10) || 100;
   const maxSize = maxMB * 1024 * 1024;
 
-  // Content-Length 快路径：超限直接 413（multipart 开销放宽 2MB）；头不可信时由 file.size 兜底
-  const cl = parseInt(request.headers.get('Content-Length') || '0', 10);
-  if (cl > maxSize + 2 * 1024 * 1024) {
-    return picgoErr(`文件大小超限（上限 ${maxMB}MB）`, 413);
-  }
-
+  // Content-Type 预检（不花大钱，先做）
   const ct = request.headers.get('Content-Type') || '';
   if (!ct.toLowerCase().startsWith('multipart/form-data')) {
     return picgoErr('Content-Type 必须是 multipart/form-data', 400);
   }
 
+  // Content-Length 快路径：超限直接 413（multipart 开销放宽 2MB）；头不可信时由 readBodyCapped 硬上限兜底
+  const cl = parseInt(request.headers.get('Content-Length') || '0', 10);
+  if (cl > maxSize + 2 * 1024 * 1024) {
+    return picgoErr(`文件大小超限（上限 ${maxMB}MB）`, 413);
+  }
+
+  // 鉴权前置（M1）：头里有凭据（Bearer / x-yunwo-password）先验证，通过才读 body，
+  // 杜绝未鉴权的大体积 multipart 白耗内存与函数时长
+  const creds = { password: '', auth: '' };
+  const bearer = request.headers.get('Authorization') || '';
+  const m = bearer.match(/^Bearer\s+(.+)$/i);
+  if (m) { creds.password = m[1]; creds.auth = m[1]; } // 两种都试：verifyAuth 先按密码、再按令牌
+  const hdrPwd = request.headers.get('x-yunwo-password');
+  if (hdrPwd) creds.password = hdrPwd;
+  if (creds.password.length > 128 || creds.auth.length > 2048) {
+    return picgoErr('鉴权参数非法', 400);
+  }
+  const hasHeaderCreds = !!(creds.password || creds.auth);
+  let authed = false;
+  if (hasHeaderCreds) {
+    if (!(await verifyAuth(creds, env))) {
+      return rejectAuth();
+    }
+    authed = true;
+  }
+
+  // 读取 body：字节硬上限，超限即中断（无 CL / CL 谎报也过不了）
+  const buf = await readBodyCapped(request, maxSize + 2 * 1024 * 1024);
+  if (!buf) {
+    return picgoErr(`文件大小超限（上限 ${maxMB}MB）`, 413);
+  }
+
   let form;
   try {
-    form = await request.formData();
+    form = await new Response(buf, { headers: { 'Content-Type': ct } }).formData();
   } catch {
     return picgoErr('表单解析失败', 400);
+  }
+
+  // 头里没带凭据时回退到表单字段鉴权（兼容无法自定义头的客户端）
+  if (!authed) {
+    const fPwd = form.get('password');
+    const fAuth = form.get('auth');
+    if (typeof fPwd === 'string' && fPwd) creds.password = fPwd;
+    if (typeof fAuth === 'string' && fAuth) creds.auth = fAuth;
+    if (creds.password.length > 128 || creds.auth.length > 2048) {
+      return picgoErr('鉴权参数非法', 400);
+    }
+    if (!(await verifyAuth(creds, env))) {
+      return rejectAuth();
+    }
   }
 
   // 取文件：优先 file 字段（PicGo 默认），否则取第一个文件字段
@@ -240,24 +306,6 @@ async function handle(request, env) {
     return picgoErr(`文件大小超限（上限 ${maxMB}MB）`, 413);
   }
 
-  // 鉴权：请求头优先（Bearer 可为密码或令牌），其次表单字段
-  const creds = { password: '', auth: '' };
-  const bearer = request.headers.get('Authorization') || '';
-  const m = bearer.match(/^Bearer\s+(.+)$/i);
-  if (m) { creds.password = m[1]; creds.auth = m[1]; } // 两种都试：verifyAuth 先按密码、再按令牌
-  const hdrPwd = request.headers.get('x-yunwo-password');
-  if (hdrPwd) creds.password = hdrPwd;
-  const fPwd = form.get('password');
-  const fAuth = form.get('auth');
-  if (typeof fPwd === 'string' && fPwd) creds.password = fPwd;
-  if (typeof fAuth === 'string' && fAuth) creds.auth = fAuth;
-  if (creds.password.length > 128 || creds.auth.length > 2048) {
-    return picgoErr('鉴权参数非法', 400);
-  }
-  if (!(await verifyAuth(creds, env))) {
-    return rejectAuth();
-  }
-
   // 默认保留原文件名（PicGo 场景需要可读的链接名）；表单 keepname=0/false 可关闭
   const kn = String(form.get('keepname') || '').toLowerCase();
   const keepName = kn !== '0' && kn !== 'false';
@@ -271,7 +319,8 @@ async function handle(request, env) {
     return picgoOk(url, key, file.name, file.size);
   } catch (e) {
     if (e.code === 'CONFLICT') return picgoErr(e.message, 409);
-    return picgoErr(e.message, 502);
+    console.error('upload failed:', e && e.message); // 细节留在平台日志，不外泄
+    return picgoErr('OSS 写入失败', 502);
   }
 }
 

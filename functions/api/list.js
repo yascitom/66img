@@ -200,11 +200,9 @@ async function listObjects(env, token, dir) {
       xml = await r.text();
       if (!r.ok) {
         const code2 = (xml.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
-        throw new Error(
-          'OSS 列表请求失败：' + code2 +
-          '（已按 OSS 签名串重试仍失败）｜OSS期望[' + ossStr.replace(/\n/g, '⏎') +
-          ']｜我方[' + myStringToSign.replace(/\n/g, '⏎') + ']'
-        );
+        // 签名排障细节（双方 StringToSign）只进平台日志，不进响应体
+        console.error('OSS 列表重签仍失败：', code2, '｜OSS期望[', ossStr, ']｜我方[', myStringToSign, ']');
+        throw new Error('OSS 列表请求失败：' + code2);
       }
     } else {
       throw new Error('OSS 列表请求失败：' + code);

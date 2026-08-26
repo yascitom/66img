@@ -70,6 +70,7 @@ function sanitizeBaseName(filename) {
 // 与 sign.js 同一套目录归类规则，保证两种上传方式落到相同路径
 // keepName=true 时用清洗后的原文件名；否则用随机 UUID
 function makeObjectKey(filename, keepName) {
+  filename = String(filename || 'file.bin'); // 类型归一：防止非字符串入参抛 TypeError
   const ext = filename.includes('.') ? (filename.split('.').pop() || 'bin').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8) || 'bin' : 'bin';
   const dir = IMG_EXTS.includes(ext) ? 'upweb/img'
     : VIDEO_EXTS.includes(ext) ? 'upweb/video'
@@ -244,19 +245,22 @@ function encodeKeyPath(key) {
 //   <StringToSign>（OSS 按实际收到的请求算出的待签串）重签重试一次，
 //   可自动适应边缘运行时对请求头的任何改写。
 // ------------------------------------------------------------
-async function ossRequest(env, method, key, subResource, contentType, bodyText) {
+async function ossRequest(env, method, key, subResource, contentType, bodyText, forbidOverwrite) {
   const bucket = env.OSS_BUCKET;
   const endpoint = env.OSS_ENDPOINT;
   const url = `https://${bucket}.${endpoint}/${encodeKeyPath(key)}${subResource}`;
 
   const date = new Date().toUTCString();
   const canonicalizedResource = `/${bucket}/${key}${subResource}`;
-  const myStringToSign = `${method}\n\n${contentType || ''}\n\nx-oss-date:${date}\n${canonicalizedResource}`;
+  // x-oss- 头按名称字典序进入待签串：x-oss-date < x-oss-forbid-overwrite
+  const ossHeaders = forbidOverwrite ? `x-oss-date:${date}\nx-oss-forbid-overwrite:true\n` : `x-oss-date:${date}\n`;
+  const myStringToSign = `${method}\n\n${contentType || ''}\n\n${ossHeaders}${canonicalizedResource}`;
 
   const headers = {
     'x-oss-date': date,
     Authorization: `OSS ${env.OSS_ACCESS_KEY_ID}:${await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, myStringToSign)}`,
   };
+  if (forbidOverwrite) headers['x-oss-forbid-overwrite'] = 'true';
   if (contentType) headers['Content-Type'] = contentType;
 
   let r = await fetch(url, { method, headers, body: bodyText || undefined });
@@ -273,12 +277,19 @@ async function ossRequest(env, method, key, subResource, contentType, bodyText) 
       xml = await r.text();
       if (!r.ok) {
         const code2 = (xml.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
-        throw new Error(
-          `OSS ${method} 请求失败：` + code2 +
-          '（已按 OSS 签名串重试仍失败）｜OSS期望[' + ossStr.replace(/\n/g, '⏎') +
-          ']｜我方[' + myStringToSign.replace(/\n/g, '⏎') + ']'
-        );
+        if (code2 === 'FileAlreadyExists') {
+          const err = new Error('同名文件已存在，请先重命名或删除旧文件');
+          err.code = 'CONFLICT';
+          throw err;
+        }
+        // 签名排障细节（双方 StringToSign）只进平台日志，不进响应体
+        console.error(`OSS ${method} 重签仍失败：`, code2, '｜OSS期望[', ossStr, ']｜我方[', myStringToSign, ']');
+        throw new Error(`OSS ${method} 请求失败：` + code2);
       }
+    } else if (code === 'FileAlreadyExists') {
+      const err = new Error('同名文件已存在，请先重命名或删除旧文件');
+      err.code = 'CONFLICT';
+      throw err;
     } else {
       throw new Error(`OSS ${method} 请求失败：` + code);
     }
@@ -348,8 +359,9 @@ async function handle(request, env) {
       const mime = String(body.mime || 'application/octet-stream').slice(0, 100) || 'application/octet-stream';
       const key = makeObjectKey(body.filename || 'file.bin', body.keepName === true);
 
-      // 保留原文件名时做存在性预检（InitMultipart 不带 forbid-overwrite，合并时会静默覆盖同名对象）；
-      // 需要 RAM 授权 oss:GetObject。随机 UUID key 几乎不可能碰撞，跳过预检省一次请求。
+      // 保留原文件名时做存在性预检（提前 409，避免白传分片）；
+      // complete 另带 x-oss-forbid-overwrite 硬兜底，堵住「预检→合并」时间窗内的静默覆盖。
+      // 预检需要 RAM 授权 oss:GetObject。随机 UUID key 几乎不可能碰撞，跳过预检省一次请求。
       if (body.keepName === true) {
         try {
           await ossRequest(env, 'GET', key, '?objectMeta', '', null);
@@ -464,7 +476,8 @@ async function handle(request, env) {
       }
       xmlBody += '</CompleteMultipartUpload>';
 
-      await ossRequest(env, 'POST', key, `?uploadId=${encodeURIComponent(uploadId)}`, 'application/xml', xmlBody);
+      // 合并：带 x-oss-forbid-overwrite 硬兜底，同名对象存在时 OSS 拒绝合并（409），绝不静默覆盖
+      await ossRequest(env, 'POST', key, `?uploadId=${encodeURIComponent(uploadId)}`, 'application/xml', xmlBody, true);
 
       return jsonResponse({
         ok: true,
@@ -490,6 +503,7 @@ async function handle(request, env) {
 
     return jsonResponse({ error: '未知 action（支持 init/part/complete/abort）' }, 400);
   } catch (e) {
+    if (e.code === 'CONFLICT') return jsonResponse({ error: e.message, code: 'CONFLICT' }, 409);
     return jsonResponse({ error: e.message }, 502);
   }
 }

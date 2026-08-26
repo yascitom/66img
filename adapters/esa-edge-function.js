@@ -216,6 +216,7 @@ function sanitizeBaseName(filename) {
 // 按扩展名归类目录：upweb/img 图片 · upweb/video 视频 · upweb/other 其他
 // keepName=true 时用清洗后的原文件名；否则用随机 UUID
 function makeObjectKey(filename, keepName) {
+  filename = String(filename || 'file.bin'); // 类型归一：防止非字符串入参抛 TypeError
   const ext = filename.includes('.') ? (filename.split('.').pop() || 'bin').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8) || 'bin' : 'bin';
   const dir = IMG_EXTS.includes(ext) ? 'upweb/img'
     : VIDEO_EXTS.includes(ext) ? 'upweb/video'
@@ -272,7 +273,9 @@ async function listObjects(token, dir) {
       xml = await r.text();
       if (!r.ok) {
         const code2 = (xml.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
-        throw new Error('OSS 列表请求失败：' + code2 + '（已按 OSS 签名串重试仍失败）｜OSS期望[' + ossStr.replace(/\n/g, '⏎') + ']｜我方[' + myStringToSign.replace(/\n/g, '⏎') + ']');
+        // 签名排障细节（双方 StringToSign）只进平台日志，不进响应体
+        console.error('OSS 列表重签仍失败：', code2, '｜OSS期望[', ossStr, ']｜我方[', myStringToSign, ']');
+        throw new Error('OSS 列表请求失败：' + code2);
       }
     } else {
       throw new Error('OSS 列表请求失败：' + code);
@@ -335,7 +338,9 @@ async function deleteObject(key) {
       if (!r.ok && r.status !== 204) {
         const xml2 = await r.text();
         const code2 = (xml2.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
-        throw new Error('OSS 删除失败：' + code2 + '（已按 OSS 签名串重试仍失败）｜OSS期望[' + ossStr.replace(/\n/g, '⏎') + ']｜我方[' + myStringToSign.replace(/\n/g, '⏎') + ']');
+        // 签名排障细节（双方 StringToSign）只进平台日志，不进响应体
+        console.error('OSS 删除重签仍失败：', code2, '｜OSS期望[', ossStr, ']｜我方[', myStringToSign, ']');
+        throw new Error('OSS 删除失败：' + code2);
       }
     } else {
       throw new Error('OSS 删除失败：' + code);
@@ -594,6 +599,31 @@ async function putObject(key, bytes, contentType) {
   }
 }
 
+// ------------------------------------------------------------
+// 带字节硬上限读取请求体：超限即中断流，返回 null。
+// Content-Length 缺失或谎报时也不能超过 cap（防未鉴权大体积消耗）。
+// ------------------------------------------------------------
+async function readBodyCapped(request, cap) {
+  if (!request.body) return new Uint8Array(0);
+  const reader = request.body.getReader();
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > cap) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(value);
+  }
+  const buf = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) { buf.set(c, off); off += c.byteLength; }
+  return buf;
+}
+
 async function handleUpload(request) {
   const required = ['OSS_ACCESS_KEY_ID', 'OSS_ACCESS_KEY_SECRET', 'OSS_BUCKET', 'OSS_ENDPOINT', 'PUBLIC_URL_BASE'];
   for (const k of required) {
@@ -604,20 +634,62 @@ async function handleUpload(request) {
 
   const maxMB = parseInt(getEnv('MAX_SIZE_MB'), 10) || 100;
   const maxSize = maxMB * 1024 * 1024;
-  // Content-Length 快路径：超限直接 413（multipart 开销放宽 2MB）；头不可信时由 file.size 兜底
-  const cl = parseInt(request.headers.get('Content-Length') || '0', 10);
-  if (cl > maxSize + 2 * 1024 * 1024) {
-    return picgoErr(`文件大小超限（上限 ${maxMB}MB）`, 413);
-  }
+  // Content-Type 预检（不花大钱，先做）
   const ct = request.headers.get('Content-Type') || '';
   if (!ct.toLowerCase().startsWith('multipart/form-data')) {
     return picgoErr('Content-Type 必须是 multipart/form-data', 400);
   }
+  // Content-Length 快路径：超限直接 413（multipart 开销放宽 2MB）；头不可信时由 readBodyCapped 硬上限兜底
+  const cl = parseInt(request.headers.get('Content-Length') || '0', 10);
+  if (cl > maxSize + 2 * 1024 * 1024) {
+    return picgoErr(`文件大小超限（上限 ${maxMB}MB）`, 413);
+  }
+
+  // 鉴权前置：头里有凭据（Bearer / x-yunwo-password）先验证，通过才读 body，
+  // 杜绝未鉴权的大体积 multipart 白耗内存与函数时长
+  const creds = { password: '', auth: '' };
+  const m = (request.headers.get('Authorization') || '').match(/^Bearer\s+(.+)$/i);
+  if (m) { creds.password = m[1]; creds.auth = m[1]; }
+  const hdrPwd = request.headers.get('x-yunwo-password');
+  if (hdrPwd) creds.password = hdrPwd;
+  if (creds.password.length > 128 || creds.auth.length > 2048) {
+    return picgoErr('鉴权参数非法', 400);
+  }
+  const hasHeaderCreds = !!(creds.password || creds.auth);
+  let authed = false;
+  if (hasHeaderCreds) {
+    if (!(await verifyAuth(creds))) {
+      await new Promise(r => setTimeout(r, 400));
+      return picgoErr('上传密码错误或会话已过期', 401);
+    }
+    authed = true;
+  }
+
+  // 读取 body：字节硬上限，超限即中断（无 CL / CL 谎报也过不了）
+  const buf = await readBodyCapped(request, maxSize + 2 * 1024 * 1024);
+  if (!buf) {
+    return picgoErr(`文件大小超限（上限 ${maxMB}MB）`, 413);
+  }
   let form;
   try {
-    form = await request.formData();
+    form = await new Response(buf, { headers: { 'Content-Type': ct } }).formData();
   } catch {
     return picgoErr('表单解析失败', 400);
+  }
+
+  // 头里没带凭据时回退到表单字段鉴权（兼容无法自定义头的客户端）
+  if (!authed) {
+    const fPwd = form.get('password');
+    const fAuth = form.get('auth');
+    if (typeof fPwd === 'string' && fPwd) creds.password = fPwd;
+    if (typeof fAuth === 'string' && fAuth) creds.auth = fAuth;
+    if (creds.password.length > 128 || creds.auth.length > 2048) {
+      return picgoErr('鉴权参数非法', 400);
+    }
+    if (!(await verifyAuth(creds))) {
+      await new Promise(r => setTimeout(r, 400));
+      return picgoErr('上传密码错误或会话已过期', 401);
+    }
   }
   // 取文件：优先 file 字段（PicGo 默认），否则取第一个文件字段
   let file = form.get('file');
@@ -633,24 +705,6 @@ async function handleUpload(request) {
     return picgoErr(`文件大小超限（上限 ${maxMB}MB）`, 413);
   }
 
-  // 鉴权：请求头优先（Bearer 可为密码或令牌），其次表单字段
-  const creds = { password: '', auth: '' };
-  const m = (request.headers.get('Authorization') || '').match(/^Bearer\s+(.+)$/i);
-  if (m) { creds.password = m[1]; creds.auth = m[1]; }
-  const hdrPwd = request.headers.get('x-yunwo-password');
-  if (hdrPwd) creds.password = hdrPwd;
-  const fPwd = form.get('password');
-  const fAuth = form.get('auth');
-  if (typeof fPwd === 'string' && fPwd) creds.password = fPwd;
-  if (typeof fAuth === 'string' && fAuth) creds.auth = fAuth;
-  if (creds.password.length > 128 || creds.auth.length > 2048) {
-    return picgoErr('鉴权参数非法', 400);
-  }
-  if (!(await verifyAuth(creds))) {
-    await new Promise(r => setTimeout(r, 400));
-    return picgoErr('上传密码错误或会话已过期', 401);
-  }
-
   const kn = String(form.get('keepname') || '').toLowerCase();
   const keepName = kn !== '0' && kn !== 'false';
   const key = makeObjectKey(file.name || 'file.bin', keepName);
@@ -663,7 +717,8 @@ async function handleUpload(request) {
     return picgoOk(url, key, file.name, file.size);
   } catch (e) {
     if (e.code === 'CONFLICT') return picgoErr(e.message, 409);
-    return picgoErr(e.message, 502);
+    console.error('upload failed:', e && e.message); // 细节留在平台日志，不外泄
+    return picgoErr('OSS 写入失败', 502);
   }
 }
 
@@ -687,17 +742,20 @@ function encodeKeyPath(key) {
 }
 
 // 服务端签名直调 OSS（init/complete/abort），V1 Header 签名 + 签名自愈重试
-async function ossRequest(method, key, subResource, contentType, bodyText) {
+// forbidOverwrite=true 时带 x-oss-forbid-overwrite（complete 防静默覆盖用；字典序 x-oss-date < x-oss-forbid-overwrite）
+async function ossRequest(method, key, subResource, contentType, bodyText, forbidOverwrite) {
   const bucket = getEnv('OSS_BUCKET');
   const endpoint = getEnv('OSS_ENDPOINT');
   const url = `https://${bucket}.${endpoint}/${encodeKeyPath(key)}${subResource}`;
   const date = new Date().toUTCString();
   const canonicalizedResource = `/${bucket}/${key}${subResource}`;
-  const myStringToSign = `${method}\n\n${contentType || ''}\n\nx-oss-date:${date}\n${canonicalizedResource}`;
+  const ossHeaders = forbidOverwrite ? `x-oss-date:${date}\nx-oss-forbid-overwrite:true\n` : `x-oss-date:${date}\n`;
+  const myStringToSign = `${method}\n\n${contentType || ''}\n\n${ossHeaders}${canonicalizedResource}`;
   const headers = {
     'x-oss-date': date,
     Authorization: `OSS ${getEnv('OSS_ACCESS_KEY_ID')}:${await hmacSha1Base64(getEnv('OSS_ACCESS_KEY_SECRET'), myStringToSign)}`,
   };
+  if (forbidOverwrite) headers['x-oss-forbid-overwrite'] = 'true';
   if (contentType) headers['Content-Type'] = contentType;
   let r = await fetch(url, { method, headers, body: bodyText || undefined });
   let xml = await r.text();
@@ -711,8 +769,19 @@ async function ossRequest(method, key, subResource, contentType, bodyText) {
       xml = await r.text();
       if (!r.ok) {
         const code2 = (xml.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
-        throw new Error(`OSS ${method} 请求失败：` + code2 + '（已按 OSS 签名串重试仍失败）｜OSS期望[' + ossStr.replace(/\n/g, '⏎') + ']｜我方[' + myStringToSign.replace(/\n/g, '⏎') + ']');
+        if (code2 === 'FileAlreadyExists') {
+          const err = new Error('同名文件已存在，请先重命名或删除旧文件');
+          err.code = 'CONFLICT';
+          throw err;
+        }
+        // 签名排障细节（双方 StringToSign）只进平台日志，不进响应体
+        console.error(`OSS ${method} 重签仍失败：`, code2, '｜OSS期望[', ossStr, ']｜我方[', myStringToSign, ']');
+        throw new Error(`OSS ${method} 请求失败：` + code2);
       }
+    } else if (code === 'FileAlreadyExists') {
+      const err = new Error('同名文件已存在，请先重命名或删除旧文件');
+      err.code = 'CONFLICT';
+      throw err;
     } else {
       throw new Error(`OSS ${method} 请求失败：` + code);
     }
@@ -764,8 +833,9 @@ async function handleMultipart(request) {
       }
       const mime = String(body.mime || 'application/octet-stream').slice(0, 100) || 'application/octet-stream';
       const key = makeObjectKey(body.filename || 'file.bin', body.keepName === true);
-      // 保留原文件名时做存在性预检（InitMultipart 不带 forbid-overwrite，合并时会静默覆盖同名对象）；
-      // 需要 RAM 授权 oss:GetObject。随机 UUID key 几乎不可能碰撞，跳过预检省一次请求。
+      // 保留原文件名时做存在性预检（提前 409，避免白传分片）；
+      // complete 另带 x-oss-forbid-overwrite 硬兜底，堵住「预检→合并」时间窗内的静默覆盖。
+      // 预检需要 RAM 授权 oss:GetObject。随机 UUID key 几乎不可能碰撞，跳过预检省一次请求。
       if (body.keepName === true) {
         try {
           await ossRequest('GET', key, '?objectMeta', '', null);
@@ -858,7 +928,8 @@ async function handleMultipart(request) {
         xmlBody += `<Part><PartNumber>${n}</PartNumber><ETag>"${xmlEscape(etag)}"</ETag></Part>`;
       }
       xmlBody += '</CompleteMultipartUpload>';
-      await ossRequest('POST', key, `?uploadId=${encodeURIComponent(uploadId)}`, 'application/xml', xmlBody);
+      // 合并：带 x-oss-forbid-overwrite 硬兜底，同名对象存在时 OSS 拒绝合并（409），绝不静默覆盖
+      await ossRequest('POST', key, `?uploadId=${encodeURIComponent(uploadId)}`, 'application/xml', xmlBody, true);
       return jsonResponse({ ok: true, key, url: `${getEnv('PUBLIC_URL_BASE').replace(/\/$/, '')}/${encodeKeyPath(key)}`, dir: key.split('/').slice(0, 2).join('/') });
     }
 
@@ -874,6 +945,7 @@ async function handleMultipart(request) {
 
     return jsonResponse({ error: '未知 action（支持 init/part/complete/abort）' }, 400);
   } catch (e) {
+    if (e.code === 'CONFLICT') return jsonResponse({ error: e.message, code: 'CONFLICT' }, 409);
     return jsonResponse({ error: e.message }, 502);
   }
 }

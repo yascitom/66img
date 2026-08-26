@@ -188,6 +188,7 @@ function sanitizeBaseName(filename) {
 // keepName=true 时用清洗后的原文件名（同名冲突会被 x-oss-forbid-overwrite 拒绝，不会静默覆盖）；
 // 否则用随机 UUID。
 function makeObjectKey(filename, keepName) {
+  filename = String(filename || 'file.bin'); // 类型归一：防止非字符串入参（如 {"filename":123}）抛 TypeError
   const ext = filename.includes('.') ? (filename.split('.').pop() || 'bin').toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 8) || 'bin' : 'bin';
   const dir = IMG_EXTS.includes(ext) ? 'upweb/img'
     : VIDEO_EXTS.includes(ext) ? 'upweb/video'
