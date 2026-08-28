@@ -61,7 +61,9 @@
    - ⚠️ **多条规则时注意**：OSS 按「第一条匹配的规则」生效。若存在 `*` 通配规则排在前面，会抢先匹配你的站点——请给它也加上 ETag 暴露头，或直接删除多余的通配规则
    - ⚠️ 跨域规则**生效有最长 15 分钟延迟**；改完后若浏览器仍报旧错，用无痕窗口重试（避开预检缓存）
 3. **（强烈建议）配置生命周期规则自动清理残留分片**：分片上传中断后，已传的分片会暂存 OSS 并计费。OSS 控制台 → 你的 Bucket → 数据管理 → 生命周期 → 创建规则 → 前缀 `upweb/` → 「碎片管理」勾选**过期碎片 3 天后删除**。这样任何烂尾上传都会自动清理，**不会悄悄产生存储费**
-4. 建议创建 **RAM 子账号 AccessKey**，只授权这一个 Bucket 的 `oss:PutObject`、`oss:GetObject`（重命名复制源需要）、`oss:ListObjects`、`oss:DeleteObject`、`oss:AbortMultipartUpload` 等权限（直接给 `oss:*` 限定该桶最省事），别用主账号 AK
+4. 建议创建 **RAM 子账号 AccessKey**，直接授权系统策略 **`AliyunOSSFullAccess`**（管理对象存储服务 OSS 权限）即可，别用主账号 AK。
+   - ⚠️ **不推荐手动勾选最小权限**：分片上传的合并请求需要 `oss:ListParts`，很容易漏配导致合并报 `AccessDenied`（分片已传成功但 Complete 失败）。已有国内版 OSS 用户踩坑（国际版策略规则可能略有差异），直接给 FullAccess 最省事
+   - 如坚持最小化授权，该桶至少需要：`oss:PutObject`、`oss:GetObject`（重命名复制源需要）、`oss:ListObjects`、`oss:ListParts`（分片合并需要）、`oss:DeleteObject`、`oss:AbortMultipartUpload`
 
 ## 环境变量（三平台通用）
 
