@@ -140,6 +140,7 @@
 - **ETag 双保险**：合并分片需要每片的 ETag。前端优先读取 OSS 响应头里的 ETag（需 CORS 暴露），读不到时用本地计算的分片 MD5（二者本来相等），因此 CORS 暴露头配不配都能传。
 - **小文件的兜底**：≤10MB 文件仍走 PostObject 一次直传；若慢网络拖到 Policy 过期，前端检测到 `Policy expired` 会**自动重签重传一次**。
 - **瞬时故障自愈**：边缘函数到 OSS 的子请求偶发 `net_exception_timeout` 类网络抖动。函数侧 init/complete/abort 的 OSS 调用统一带 15s 超时 + 3 次重试；前端对 init/complete 再做一轮重试（part 分片本就有 3 次重签重传）。合并接口额外做了幂等处理——「合并成功但响应丢失」时重试会收到 OSS 的 `NoSuchUpload`，此时检测到对象已存在即按成功返回，**不会触发整包重传**；abort 同理，会话已不存在视为清理成功。
+- ⚠️ **同名存在性检查必须用 HEAD（HeadObject），不能用 `GET ?objectMeta`**：objectMeta 的 200 响应头 `Content-Length` 是对象大小却没有响应体，EO/ESA 边缘运行时的 fetch 会干等 body 直至平台超时（表现为同名文件上传卡死后报 `net_exception_timeout`）；HEAD 语义上无响应体，读完响应头即结束。init 预检与 complete 幂等检查均用 HEAD。
 - **阈值**：前端固定以 10MB 为界选择两条通道，与服务端默认 `PART_SIZE_MB=10` 对齐。
 
 ## 费用说明
