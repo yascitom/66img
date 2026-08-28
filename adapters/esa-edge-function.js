@@ -741,6 +741,29 @@ function encodeKeyPath(key) {
   return key.split('/').map(encodeURIComponent).join('/');
 }
 
+// 带超时与瞬时故障重试的 fetch：边缘运行时到 OSS 的子请求偶发 net_exception_timeout 等
+// 网络抖动，单次抖动不应判死一次已传了几十分钟的分片上传。仅网络层错误重试；
+// OSS 已应答的业务错误（4xx/NoSuchUpload/CONFLICT 等）不在此层处理，交由调用方判断。
+const OSS_FETCH_TIMEOUT_MS = 15000;
+const OSS_FETCH_TRIES = 3;
+
+async function fetchWithRetry(url, options) {
+  let lastErr = null;
+  for (let attempt = 1; attempt <= OSS_FETCH_TRIES; attempt++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), OSS_FETCH_TIMEOUT_MS);
+    try {
+      return await fetch(url, Object.assign({}, options, { signal: ctrl.signal }));
+    } catch (e) {
+      lastErr = e;
+      if (attempt < OSS_FETCH_TRIES) await new Promise(r => setTimeout(r, 400 * attempt));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw new Error('OSS 子请求连续失败（含超时重试）：' + ((lastErr && lastErr.message) || lastErr));
+}
+
 // 服务端签名直调 OSS（init/complete/abort），V1 Header 签名 + 签名自愈重试
 // forbidOverwrite=true 时带 x-oss-forbid-overwrite（complete 防静默覆盖用；字典序 x-oss-date < x-oss-forbid-overwrite）
 async function ossRequest(method, key, subResource, contentType, bodyText, forbidOverwrite) {
@@ -757,7 +780,7 @@ async function ossRequest(method, key, subResource, contentType, bodyText, forbi
   };
   if (forbidOverwrite) headers['x-oss-forbid-overwrite'] = 'true';
   if (contentType) headers['Content-Type'] = contentType;
-  let r = await fetch(url, { method, headers, body: bodyText || undefined });
+  let r = await fetchWithRetry(url, { method, headers, body: bodyText || undefined });
   let xml = await r.text();
   if (!r.ok) {
     const code = (xml.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
@@ -765,7 +788,7 @@ async function ossRequest(method, key, subResource, contentType, bodyText, forbi
     if (code === 'SignatureDoesNotMatch' && ossString) {
       const ossStr = xmlUnescape(ossString);
       headers.Authorization = `OSS ${getEnv('OSS_ACCESS_KEY_ID')}:${await hmacSha1Base64(getEnv('OSS_ACCESS_KEY_SECRET'), ossStr)}`;
-      r = await fetch(url, { method, headers, body: bodyText || undefined });
+      r = await fetchWithRetry(url, { method, headers, body: bodyText || undefined });
       xml = await r.text();
       if (!r.ok) {
         const code2 = (xml.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
@@ -929,7 +952,18 @@ async function handleMultipart(request) {
       }
       xmlBody += '</CompleteMultipartUpload>';
       // 合并：带 x-oss-forbid-overwrite 硬兜底，同名对象存在时 OSS 拒绝合并（409），绝不静默覆盖
-      await ossRequest('POST', key, `?uploadId=${encodeURIComponent(uploadId)}`, 'application/xml', xmlBody, true);
+      try {
+        await ossRequest('POST', key, `?uploadId=${encodeURIComponent(uploadId)}`, 'application/xml', xmlBody, true);
+      } catch (e) {
+        // 「合并其实成功但响应丢失」场景：重试时 uploadId 已被消费，OSS 返回 NoSuchUpload。
+        // 此时若对象已存在，说明上次合并已成功——按成功处理，避免前端整包重传。
+        if (!/NoSuchUpload/.test(e.message)) throw e;
+        try {
+          await ossRequest('GET', key, '?objectMeta', '', null);
+        } catch (e2) {
+          throw e; // 对象不存在 → 会话确实已失效，抛原始错误
+        }
+      }
       return jsonResponse({ ok: true, key, url: `${getEnv('PUBLIC_URL_BASE').replace(/\/$/, '')}/${encodeKeyPath(key)}`, dir: key.split('/').slice(0, 2).join('/') });
     }
 
@@ -939,7 +973,11 @@ async function handleMultipart(request) {
       if (!validMpKey(key) || !uploadId) return jsonResponse({ error: '参数非法' }, 400);
       const mp = await mpSession(body, key, uploadId);
       if (!mp) return rejectSession();
-      await ossRequest('DELETE', key, `?uploadId=${encodeURIComponent(uploadId)}`, '', null);
+      try {
+        await ossRequest('DELETE', key, `?uploadId=${encodeURIComponent(uploadId)}`, '', null);
+      } catch (e) {
+        if (!/NoSuchUpload/.test(e.message)) throw e; // 会话已不存在（如已合并/已清理）视为取消成功
+      }
       return jsonResponse({ ok: true });
     }
 

@@ -601,6 +601,24 @@
     return data;
   }
 
+  // 瞬时故障重试：init/complete 没有外层重试兜底（part 分片本身已有 3 次重签重传），
+  // 边缘函数到 OSS 的子请求偶发超时（net_exception_timeout）不应直接判死整次上传。
+  // 带业务 code 的错误（BAD_SESSION / CONFLICT 等）不重试，直接上交外层处理。
+  async function mpApiRetry(payload, tries){
+    const n=tries||3;
+    let lastErr=null;
+    for(let attempt=1; attempt<=n; attempt++){
+      try{ return await mpApi(payload); }
+      catch(e){
+        lastErr=e;
+        if(e.code) throw e;
+        if(!/net_exception|timeout|timed out|50[234]|failed to fetch|network/i.test(e.message||'')) throw e;
+        if(attempt<n) await new Promise(r=>setTimeout(r, 1200*attempt));
+      }
+    }
+    throw lastErr;
+  }
+
   // 精简 MD5（ArrayBuffer → hex，基于 Paul Johnston 公共域实现改写）
   // 用途：本地计算分片内容 MD5 作为 ETag 兜底 —— OSS UploadPart 的 ETag 即分片内容 MD5，
   // 这样即使桶 CORS 没配 ExposeHeader: ETag（或被其他通配规则抢先匹配），上传也不受影响。
@@ -721,7 +739,7 @@
       try{
         if(!resumed){
           setQ(item, 10, '初始化分片上传…');
-          const init=await mpApi({action:'init', filename:file.name, size:file.size, mime:file.type||'application/octet-stream', keepName:keepNameEl.checked});
+          const init=await mpApiRetry({action:'init', filename:file.name, size:file.size, mime:file.type||'application/octet-stream', keepName:keepNameEl.checked});
           task={key:init.key, uploadId:init.uploadId, partSize:init.partSize, session:init.session||'', dir:init.dir, mime:file.type||'application/octet-stream', parts:{}};
           saveMpTask(fp, task);
         }else{
@@ -754,7 +772,7 @@
 
         setQ(item, 97, '合并分片…');
         const parts=Object.keys(task.parts).map(k=>({partNumber:+k, etag:task.parts[k]})).sort((a,b)=>a.partNumber-b.partNumber);
-        const done=await mpApi({action:'complete', key:task.key, uploadId:task.uploadId, session:task.session||'', parts});
+        const done=await mpApiRetry({action:'complete', key:task.key, uploadId:task.uploadId, session:task.session||'', parts});
         delMpTask(fp);
         return {url:done.url, dir:done.dir, key:done.key};
       }catch(e){
