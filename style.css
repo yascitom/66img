@@ -173,7 +173,12 @@ input[type=range]{accent-color:var(--accent);width:110px;vertical-align:middle}
   background:var(--w7);color:var(--muted);transition:.2s;
 }
 .qbtn:hover{color:var(--text)}
+.qbtn:active{transform:scale(.95)}
 .qbtn.primary{background:var(--grad);color:#fff}
+/* 暂停态：整行降不透明度，进度条退为灰色，与进行中区分 */
+.qitem.paused{opacity:.72}
+.qitem.paused .qbar>i{background:var(--faint)}
+.up-dot.warn{background:var(--warn)}
 
 /* ===== 链接结果条 ===== */
 .linkrow{display:flex;gap:8px;margin-bottom:8px}

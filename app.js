@@ -231,23 +231,86 @@
   // 队列不再占用上传卡片内的位置：进度收进右下浮层，大文件长传时可继续浏览/管理云端文件。
   // 面板头部实时汇总进度，全部完成后露出「清空」入口；点击头部可折叠。
   const upPanel=$('upPanel'), upStatus=$('upStatus'), upDot=$('upDot'), upClear=$('upClear');
+  function pausedErr(){ const e=new Error('已暂停'); e.code='PAUSED'; return e; }
+  function cancelledErr(){ const e=new Error('已取消'); e.code='CANCELLED'; return e; }
+
+  // 每个队列项右侧的控制按钮：上传中→暂停/取消，已暂停→继续/取消，排队中→取消，结束态→无
+  function setQControls(item, state){
+    const act=item.el.querySelector('.qact');
+    act.innerHTML='';
+    const mk=(txt,primary,fn)=>{
+      const b=document.createElement('button');
+      b.className='qbtn'+(primary?' primary':'');
+      b.textContent=txt;
+      b.addEventListener('click',()=>fn());
+      act.appendChild(b);
+    };
+    if(state==='uploading'){ mk('暂停',0,()=>pauseItem(item)); mk('取消',0,()=>cancelItem(item)); }
+    else if(state==='paused'){ mk('继续',1,()=>resumeItem(item)); mk('取消',0,()=>cancelItem(item)); }
+    else if(state==='queued'){ mk('取消',0,()=>cancelItem(item)); }
+    // done / err：不留按钮（复制链接在云端列表与灯箱里都有入口）
+  }
+
+  // 暂停：打标记 + 中断当前 XHR，上传循环在分片边界/进度回调里检测标记抛出 PAUSED。
+  // 已传分片进度保留在 localStorage，「继续」时从断点接着传（小文件则整体重传）。
+  function pauseItem(item){
+    if(item.state!=='uploading') return;
+    item.paused=true;
+    if(item.currentXhr){ try{item.currentXhr.abort();}catch(e){} }
+    setQ(item, item.lastPct||0, '正在暂停…');
+  }
+  function resumeItem(item){
+    if(item.state!=='paused') return;
+    item.paused=false; item.state='queued';
+    item.el.classList.remove('paused');
+    setQ(item, item.lastPct||8, '排队等待继续上传…');
+    setQControls(item,'queued');
+    pending.unshift(item);
+    updateUpHead();
+    processQueue();
+  }
+  // 取消：排队中直接移除；上传中先断 XHR 再交给 processQueue 收尾；
+  // 已初始化过分片的还要通知 OSS 清理残留分片、删掉本机续传进度
+  async function cancelItem(item){
+    if(item.state==='done'||item.state==='err'){ item.el.remove(); updateUpHead(); return; }
+    item.cancelled=true;
+    const i=pending.indexOf(item); if(i>=0) pending.splice(i,1);
+    if(item.currentXhr){ try{item.currentXhr.abort();}catch(e){} }
+    const fp=fpOf(item.file), task=getMpTasks()[fp];
+    if(task && task.uploadId){
+      try{ await mpApi({action:'abort', key:task.key, uploadId:task.uploadId, session:task.session||''}); }catch(e){}
+      delMpTask(fp);
+    }
+    if(item.state!=='uploading'){ item.el.remove(); updateUpHead(); }
+  }
+
   function updateUpHead(){
     const items=queue.children;
     if(!items.length){ upPanel.classList.remove('show'); return; }
-    let done=0, fail=0;
+    let done=0, fail=0, pausedN=0;
     for(const el of items){
       const st=el.querySelector('.st');
       if(st.classList.contains('ok')) done++;
       else if(st.classList.contains('err')) fail++;
+      if(el.classList.contains('paused')) pausedN++;
     }
     upPanel.classList.add('show');
     if(uploading){
-      upStatus.textContent='上传中 '+(done+fail)+'/'+items.length;
+      upStatus.textContent='上传中 '+(done+fail)+'/'+items.length+(pausedN?' · 暂停 '+pausedN:'');
       upDot.className='up-dot active';
       upClear.style.display='none';
     }else{
-      upStatus.textContent=fail?('完成 '+done+' 个 · 失败 '+fail+' 个'):('已完成 '+items.length+' 个文件');
-      upDot.className='up-dot '+(fail?'err':'ok');
+      if(!fail && !pausedN && done===items.length){
+        upStatus.textContent='已完成 '+items.length+' 个文件';
+        upDot.className='up-dot ok';
+      }else{
+        const parts=[];
+        if(done) parts.push('完成 '+done+' 个');
+        if(fail) parts.push('失败 '+fail+' 个');
+        if(pausedN) parts.push('暂停 '+pausedN+' 个');
+        upStatus.textContent=parts.join(' · ')||('共 '+items.length+' 个');
+        upDot.className='up-dot '+(fail?'err':'warn');
+      }
       upClear.style.display='';
     }
   }
@@ -272,7 +335,12 @@
     overs.forEach(f=>toast(f.name+' 超过 '+maxSizeMB+'MB，已跳过','err'));
     const ok=files.filter(f=>f.size<=maxBytes);
     if(!ok.length) return;
-    ok.forEach(f=>pending.push({file:f, el:buildQItem(f)}));
+    ok.forEach(f=>{
+      const item={file:f, el:buildQItem(f), state:'queued', lastPct:0};
+      pending.push(item);
+      queue.appendChild(item.el); // 入列即上墙：面板立即出现，不用等轮到它上传
+      setQControls(item,'queued');
+    });
     updateUpHead();
     if(!uploading) processQueue();
   }
@@ -360,17 +428,23 @@
   }
 
   async function processQueue(){
+    if(uploading) return;
     uploading=true;
+    updateUpHead();
     while(pending.length){
       const item=pending.shift();
-      queue.appendChild(item.el);
+      if(item.state==='cancelled'){ item.el.remove(); updateUpHead(); continue; }
+      item.state='uploading';
+      setQControls(item,'uploading');
       try{
-        setQ(item, 8, fileTypeOf(item.file.name)==='image'?'压缩处理中…':'准备上传…');
+        setQ(item, item.lastPct||8, fileTypeOf(item.file.name)==='image'?'压缩处理中…':'准备上传…');
         let file=await maybeCompress(item.file);
 
         // 同名冲突：弹窗让用户重命名，或自动加 6 位编码后缀重试
         let result;
         for(;;){
+          if(item.paused) throw pausedErr();
+          if(item.cancelled) throw cancelledErr();
           try{
             if(file.size>MP_THRESHOLD){
               result=await uploadMultipart(item, file); // 大文件：分片直传（断点续传）
@@ -388,17 +462,22 @@
           }
         }
 
+        item.state='done'; setQControls(item,'done');
         setQ(item, 100, '✓ 完成 · '+fmtSize(file.size)+' → '+result.dir, 'ok');
-        const act=item.el.querySelector('.qact');
-        const btn=document.createElement('button');
-        btn.className='qbtn primary'; btn.textContent='复制链接';
-        btn.addEventListener('click',()=>copyText(formatLink({url:result.url, key:result.key, type:fileTypeOf(result.key)}), FMT_LABEL[curFmt]));
-        act.appendChild(btn);
         addHistory(result.url);
         prependCloudItem({key:result.key, time:new Date().toISOString(), size:file.size, url:result.url, type:fileTypeOf(result.key)});
         toast(file.name+' 上传成功','ok');
         updateUpHead();
       }catch(e){
+        if(e.code==='PAUSED'){
+          item.state='paused'; item.el.classList.add('paused');
+          setQ(item, item.lastPct||0, '⏸ 已暂停 · 点「继续」接着传');
+          setQControls(item,'paused');
+          updateUpHead();
+          continue;
+        }
+        if(e.code==='CANCELLED'){ item.el.remove(); updateUpHead(); continue; }
+        item.state='err'; setQControls(item,'err');
         setQ(item, 100, '✗ '+(e.message||'上传失败'), 'err');
         toast('上传失败：'+e.message,'err');
         updateUpHead();
@@ -406,6 +485,34 @@
     }
     uploading=false;
     updateUpHead();
+  }
+
+  // ================= 上传速度表 =================
+  // 进度回调工厂：bytesNow=该文件已传总字节（分片模式含此前已完成的分片），
+  // 0.4s 采样窗口 + EMA 平滑防数字跳动，300ms 节流刷新状态文本，textFn 生成状态前缀。
+  function fmtSpeed(bps){
+    if(bps>=1048576) return (bps/1048576).toFixed(1)+' MB/s';
+    if(bps>=1024) return Math.round(bps/1024)+' KB/s';
+    return Math.max(1,Math.round(bps))+' B/s';
+  }
+  function makeProgress(item, file, textFn){
+    let lastT=0, lastB=null, speed=0, lastPaint=0;
+    return bytesNow=>{
+      const now=Date.now();
+      if(lastB===null){ lastB=bytesNow; lastT=now; }
+      const dt=(now-lastT)/1000;
+      if(dt>=0.4){
+        const inst=(bytesNow-lastB)/dt;
+        speed=speed? speed*0.6+inst*0.4 : inst;
+        lastT=now; lastB=bytesNow;
+      }
+      if(now-lastPaint>=300){
+        lastPaint=now;
+        const pct=bytesNow/file.size*100;
+        item.lastPct=Math.min(96, 2+pct*0.94);
+        setQ(item, item.lastPct, textFn(pct)+(speed>1024?' · '+fmtSpeed(speed):''));
+      }
+    };
   }
 
   // ================= 小文件：PostObject 一次直传 =================
@@ -420,27 +527,49 @@
     if(!sr.ok) throw new Error(sign.error||('签名失败 '+sr.status));
     return sign;
   }
-  function postToOSS(sign, file){
+  // XHR 表单直传（fetch 拿不到上传进度；XHR 的 upload.onprogress 才能算实时速度）
+  function postToOSS(sign, file, item, onProgress){
     const fd=new FormData();
     Object.entries(sign.fields).forEach(([k,v])=>fd.append(k,v));
     fd.append('file',file,file.name);
-    return fetch(sign.host,{method:'POST',body:fd});
+    return new Promise((resolve,reject)=>{
+      const x=new XMLHttpRequest();
+      item.currentXhr=x;
+      x.open('POST', sign.host);
+      x.upload.onprogress=e=>{ if(e.lengthComputable && onProgress) onProgress(e.loaded); };
+      x.onload=()=>{
+        item.currentXhr=null;
+        resolve({ok:x.status>=200&&x.status<300, status:x.status, text:async()=>x.responseText||''});
+      };
+      x.onerror=()=>{
+        item.currentXhr=null;
+        if(item.paused){ reject(pausedErr()); return; }
+        if(item.cancelled){ reject(cancelledErr()); return; }
+        reject(new Error('网络中断（若反复出现，请检查桶 CORS 的来源是否包含本站域名）'));
+      };
+      x.onabort=()=>{
+        item.currentXhr=null;
+        reject(item.cancelled?cancelledErr():pausedErr());
+      };
+      x.send(fd);
+    });
   }
   async function uploadSimple(item, file){
-    setQ(item, 30, '获取签名…');
+    if(item.paused) throw pausedErr();
+    if(item.cancelled) throw cancelledErr();
+    setQ(item, 5, '获取签名…');
     let sign=await getSign(file);
-    setQ(item, 60, '上传到 OSS…');
-    let ur=await postToOSS(sign, file);
+    const progress=makeProgress(item, file, pct=>'上传到 OSS · '+Math.round(pct)+'%');
+    let ur=await postToOSS(sign, file, item, progress);
     if(!ur.ok){
       const t=await ur.text().catch(()=> '');
       // 同名冲突：x-oss-forbid-overwrite 拒绝，抛 CONFLICT 交给上层弹窗处理
       if(ur.status===409||/FileAlreadyExists/i.test(t)){ const err=new Error('同名文件已存在'); err.code='CONFLICT'; throw err; }
       // 慢网络可能拖过 Policy 10 分钟有效期：检测到过期就自动重签重传一次
       if(/Policy expired|AccessDenied/i.test(t)){
-        setQ(item, 30, '签名已过期，自动重签重传…');
+        setQ(item, 5, '签名已过期，自动重签重传…');
         sign=await getSign(file);
-        setQ(item, 60, '重新上传到 OSS…');
-        ur=await postToOSS(sign, file);
+        ur=await postToOSS(sign, file, item, progress);
         if(ur.status===409){ const err=new Error('同名文件已存在'); err.code='CONFLICT'; throw err; }
       }
     }
@@ -523,13 +652,16 @@
 
   // XHR PUT 单个分片（fetch 拿不到上传进度，XHR 可以）
   // md5Fallback：本地算好的分片 MD5，读不到 ETag 响应头时兜底
-  function xhrPut(url, blob, mime, md5Fallback, onProgress){
+  function xhrPut(url, blob, mime, md5Fallback, onProgress, item){
     return new Promise((resolve,reject)=>{
       const x=new XMLHttpRequest();
+      if(item) item.currentXhr=x;
       x.open('PUT', url);
       x.setRequestHeader('Content-Type', mime); // 须与服务端签名时的 Content-Type 完全一致
       x.upload.onprogress=e=>{ if(e.lengthComputable) onProgress(e.loaded); };
+      const clear=()=>{ if(item && item.currentXhr===x) item.currentXhr=null; };
       x.onload=()=>{
+        clear();
         if(x.status>=200 && x.status<300){
           const etag=x.getResponseHeader('ETag');
           // 优先用服务端返回的 ETag；CORS 未暴露时用本地 MD5（二者本来相等）
@@ -541,22 +673,35 @@
           reject(err);
         }
       };
-      x.onerror=()=>reject(new Error('网络中断（若反复出现，请检查桶 CORS 的来源是否包含本站域名、方法是否允许 PUT）'));
+      x.onerror=()=>{
+        clear();
+        if(item && item.paused){ reject(pausedErr()); return; }
+        if(item && item.cancelled){ reject(cancelledErr()); return; }
+        reject(new Error('网络中断（若反复出现，请检查桶 CORS 的来源是否包含本站域名、方法是否允许 PUT）'));
+      };
+      x.onabort=()=>{
+        clear();
+        reject(item && item.cancelled ? cancelledErr() : pausedErr());
+      };
       x.send(blob);
     });
   }
 
   // 单个分片：最多 3 次尝试，每次都重新签名（慢网络下签名过期也能自愈）
-  async function uploadPartWithRetry(task, n, chunk, onProgress){
+  async function uploadPartWithRetry(task, n, chunk, onProgress, item){
     const md5=md5Hex(await chunk.arrayBuffer()); // 只算一次，重试复用
     let lastErr=null;
     for(let attempt=1; attempt<=3; attempt++){
+      if(item.paused) throw pausedErr();
+      if(item.cancelled) throw cancelledErr();
       try{
         const sign=await mpApi({action:'part', key:task.key, uploadId:task.uploadId, partNumber:n, mime:task.mime, session:task.session||''});
-        const etag=await xhrPut(sign.url, chunk, task.mime, md5, onProgress);
+        const etag=await xhrPut(sign.url, chunk, task.mime, md5, onProgress, item);
         if(!etag) throw new Error('ETag 为空');
         return etag;
       }catch(e){
+        if(item.paused) throw pausedErr();
+        if(item.cancelled) throw cancelledErr();
         lastErr=e;
         if(e.code==='NoSuchUpload'||e.code==='BAD_SESSION') throw e; // 会话已失效：不重试，交给外层整体重启
         if(attempt<3) await new Promise(r=>setTimeout(r, 1500*attempt));
@@ -568,6 +713,8 @@
   async function uploadMultipart(item, file){
     const fp=fpOf(file);
     for(let restarted=0; restarted<2; restarted++){
+      if(item.paused) throw pausedErr();
+      if(item.cancelled) throw cancelledErr();
       const saved=getMpTasks()[fp];
       const resumed=!!(saved && saved.uploadId && saved.key);
       let task;
@@ -585,18 +732,24 @@
         const total=Math.ceil(file.size/task.partSize);
         const partBytes=n=>Math.min(task.partSize, file.size-(n-1)*task.partSize);
         let doneBytes=Object.keys(task.parts).reduce((s,k)=>s+partBytes(+k),0);
+        let curPart=1;
+        const progress=makeProgress(item, file, pct=>'分片 '+curPart+'/'+total+' 上传中 · '+Math.round(pct)+'%');
 
         for(let n=1; n<=total; n++){
           if(task.parts[n]) continue; // 已成功上传的分片直接跳过（断点续传核心）
+          if(item.paused) throw pausedErr();
+          if(item.cancelled) throw cancelledErr();
+          curPart=n;
           const start=(n-1)*task.partSize;
           const chunk=file.slice(start, start+partBytes(n));
           const etag=await uploadPartWithRetry(task, n, chunk, loaded=>{
-            const pct=(doneBytes+loaded)/file.size;
-            setQ(item, 10+pct*86, '分片 '+n+'/'+total+' 上传中 · '+Math.round(pct*100)+'% · 中断后重选本文件可续传');
-          });
+            if(item.paused||item.cancelled){ if(item.currentXhr) item.currentXhr.abort(); return; }
+            progress(doneBytes+loaded);
+          }, item);
           task.parts[n]=etag; saveMpTask(fp, task);
           doneBytes+=partBytes(n);
-          setQ(item, 10+(doneBytes/file.size)*86, '分片 '+n+'/'+total+' 完成 · '+Math.round(doneBytes/file.size*100)+'%');
+          item.lastPct=2+(doneBytes/file.size)*94;
+          setQ(item, item.lastPct, '分片 '+n+'/'+total+' 完成 · '+Math.round(doneBytes/file.size*100)+'%');
         }
 
         setQ(item, 97, '合并分片…');
@@ -605,6 +758,7 @@
         delMpTask(fp);
         return {url:done.url, dir:done.dir, key:done.key};
       }catch(e){
+        if(e.code==='PAUSED'||e.code==='CANCELLED') throw e; // 暂停/取消：不重试不重启，交给外层收尾
         if((e.code==='NoSuchUpload'||e.code==='BAD_SESSION') && restarted===0){
           // OSS 侧会话或本地令牌已失效（如超时 7 天被清理）：清掉本地进度，自动重来一次
           delMpTask(fp);
@@ -987,26 +1141,18 @@
       btn.disabled=false; btn.textContent='确定';
     }
   }
-  // 下载：地址即 PUBLIC_URL_BASE 前缀的直链；先 fetch 成 Blob 本地另存（保留原文件名），跨域受限则退回新标签页打开
-  $('lbDownload').addEventListener('click',async ()=>{
+  // 下载：直链 + download 文件名提示（target=_blank 防止图片/视频把当前页导航走）。
+  // 网页 JS 无法检测 IDM 这类下载器插件，但 IDM 是靠 hook 浏览器的真实下载/导航请求来接管的——
+  // 只有发起到真实 URL 的请求它才抓得到；之前的 fetch→Blob 本地下载它完全感知不到，故弃用 Blob 方案。
+  // 文件名本就在 URL 路径里（keepName 开启时为原名），下载器保存时不会丢名。
+  $('lbDownload').addEventListener('click',()=>{
     if(!lbCurrent) return;
-    const name=lbCurrent.key.split('/').pop();
-    const btn=$('lbDownload'); btn.disabled=true; btn.textContent='下载中…';
-    try{
-      const r=await fetch(lbCurrent.url);
-      if(!r.ok) throw new Error('HTTP '+r.status);
-      const blob=await r.blob();
-      const u=URL.createObjectURL(blob);
-      const a=document.createElement('a');
-      a.href=u; a.download=name; document.body.appendChild(a); a.click(); a.remove();
-      setTimeout(()=>URL.revokeObjectURL(u),4000);
-      toast('已开始下载：'+name,'ok');
-    }catch(e){
-      window.open(lbCurrent.url,'_blank','noopener,noreferrer');
-      toast('浏览器拦截了直接下载，已在新标签页打开','err');
-    }finally{
-      btn.disabled=false; btn.textContent='下载';
-    }
+    const a=document.createElement('a');
+    a.href=lbCurrent.url;
+    a.download=lbCurrent.key.split('/').pop();
+    a.target='_blank'; a.rel='noopener noreferrer';
+    document.body.appendChild(a); a.click(); a.remove();
+    toast('已发起下载（装了 IDM 等下载器会自动接管）','ok');
   });
 
   function resetDeleteBtn(){
@@ -1080,22 +1226,25 @@
     rename:function(){ this.demo('grid'); lbCurrent=cloudItems[0]; openLightbox(cloudItems[0]); document.getElementById('lbRename').click(); },
     qr:function(){ this.demo('grid'); lbCurrent=cloudItems[0]; openLightbox(cloudItems[0]); document.getElementById('lbQr').click(); },
     drag:function(){ this.demo('grid'); document.querySelectorAll('#dirTabs .tab')[2].classList.add('dropover'); },
-    // 上传面板：'run' 进行中（脉冲点+折叠头），'done' 完成态（成功/失败混合+清空按钮）
+    // 上传面板：'run' 进行中（暂停/取消+速度显示），'done' 完成态（成功/失败混合+清空），'paused' 暂停态（继续/取消）
     panel:function(state){
       this.demo('grid');
       var mk=function(n){ return new File(['x'],n,{type:'application/octet-stream'}); };
       var a=mk('已完成的资料包.zip'), b=mk('演示视频-分片上传中.mp4');
-      var ia={file:a, el:buildQItem(a)}, ib={file:b, el:buildQItem(b)};
+      var ia={file:a, el:buildQItem(a), state:'done', lastPct:100}, ib={file:b, el:buildQItem(b), state:'uploading', lastPct:54};
       queue.appendChild(ia.el); queue.appendChild(ib.el);
+      setQ(ia,100,'✓ 完成 · 1 KB → upweb/other','ok'); setQControls(ia,'done');
       if(state==='done'){
-        setQ(ia,100,'✓ 完成 · 1 KB → upweb/other','ok');
-        setQ(ib,100,'✗ 网络中断（若反复出现，请检查桶 CORS 配置）','err');
-        updateUpHead();
+        ib.state='err'; ib.lastPct=100;
+        setQ(ib,100,'✗ 网络中断（若反复出现，请检查桶 CORS 配置）','err'); setQControls(ib,'err');
+      }else if(state==='paused'){
+        ib.state='paused'; ib.el.classList.add('paused');
+        setQ(ib,54,'⏸ 已暂停 · 点「继续」接着传'); setQControls(ib,'paused');
       }else{
-        setQ(ia,100,'✓ 完成 · 1 KB → upweb/other','ok');
-        setQ(ib,54,'分片 3/6 上传中 · 54% · 中断后重选本文件可续传');
-        uploading=true; updateUpHead();
+        setQ(ib,54,'分片 3/6 上传中 · 54% · 3.2 MB/s'); setQControls(ib,'uploading');
+        uploading=true;
       }
+      updateUpHead();
     }
   };
 })();
