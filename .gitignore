@@ -1,0 +1,4 @@
+# 本地工具目录，不提交
+.agents/
+skills/
+skills-lock.json
