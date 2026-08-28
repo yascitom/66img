@@ -227,6 +227,39 @@
   let uploading=false;
   const pending=[];
 
+  // ================= 上传管理器（右下角浮动面板） =================
+  // 队列不再占用上传卡片内的位置：进度收进右下浮层，大文件长传时可继续浏览/管理云端文件。
+  // 面板头部实时汇总进度，全部完成后露出「清空」入口；点击头部可折叠。
+  const upPanel=$('upPanel'), upStatus=$('upStatus'), upDot=$('upDot'), upClear=$('upClear');
+  function updateUpHead(){
+    const items=queue.children;
+    if(!items.length){ upPanel.classList.remove('show'); return; }
+    let done=0, fail=0;
+    for(const el of items){
+      const st=el.querySelector('.st');
+      if(st.classList.contains('ok')) done++;
+      else if(st.classList.contains('err')) fail++;
+    }
+    upPanel.classList.add('show');
+    if(uploading){
+      upStatus.textContent='上传中 '+(done+fail)+'/'+items.length;
+      upDot.className='up-dot active';
+      upClear.style.display='none';
+    }else{
+      upStatus.textContent=fail?('完成 '+done+' 个 · 失败 '+fail+' 个'):('已完成 '+items.length+' 个文件');
+      upDot.className='up-dot '+(fail?'err':'ok');
+      upClear.style.display='';
+    }
+  }
+  $('upHead').addEventListener('click',e=>{
+    if(e.target.closest('#upClear')) return; // 清空不触发折叠
+    upPanel.classList.toggle('folded');
+  });
+  upClear.addEventListener('click',()=>{
+    queue.innerHTML='';
+    upPanel.classList.remove('show','folded');
+  });
+
   function fmtSize(bytes){
     if(bytes>=1048576) return (bytes/1048576).toFixed(1)+' MB';
     return (bytes/1024).toFixed(0)+' KB';
@@ -240,7 +273,7 @@
     const ok=files.filter(f=>f.size<=maxBytes);
     if(!ok.length) return;
     ok.forEach(f=>pending.push({file:f, el:buildQItem(f)}));
-    queue.classList.add('has');
+    updateUpHead();
     if(!uploading) processQueue();
   }
 
@@ -364,12 +397,15 @@
         addHistory(result.url);
         prependCloudItem({key:result.key, time:new Date().toISOString(), size:file.size, url:result.url, type:fileTypeOf(result.key)});
         toast(file.name+' 上传成功','ok');
+        updateUpHead();
       }catch(e){
         setQ(item, 100, '✗ '+(e.message||'上传失败'), 'err');
         toast('上传失败：'+e.message,'err');
+        updateUpHead();
       }
     }
     uploading=false;
+    updateUpHead();
   }
 
   // ================= 小文件：PostObject 一次直传 =================
@@ -648,7 +684,9 @@
       const d=document.createElement('div');
       d.className='gitem'; d.style.animationDelay=(Math.min(i,12)*0.03)+'s';
       const nm=f.key.split('/').pop();
-      d.innerHTML=gridTile(f)+'<div class="selbox">✓</div><div class="mask"><span>'+escapeHtml(nm)+'</span></div>'
+      const sub=(f.size?fmtSize(f.size):'')+(f.size&&f.time?' · ':'')+(f.time?new Date(f.time).toLocaleDateString():'');
+      d.innerHTML=gridTile(f)+'<div class="selbox">✓</div>'
+        +'<div class="ginfo"><div class="gname">'+escapeHtml(nm)+'</div><div class="gsub">'+escapeHtml(sub)+'</div></div>'
         +'<div class="lmeta"><span class="lname">'+escapeHtml(nm)+'</span>'
         +'<span class="linfo">'+(f.size?fmtSize(f.size):'')+(f.size&&f.time?' · ':'')+(f.time?new Date(f.time).toLocaleString():'')+'</span></div>';
       if(selected.has(f.key)) d.classList.add('sel');
@@ -973,7 +1011,7 @@
 
   function resetDeleteBtn(){
     const b=$('lbDelete');
-    b.textContent='删除'; b.classList.remove('confirm'); b.dataset.armed='';
+    b.textContent='删除文件'; b.classList.remove('confirm'); b.dataset.armed='';
   }
   $('lbDelete').addEventListener('click',async ()=>{
     if(!lbCurrent) return;
@@ -1041,6 +1079,23 @@
     batch:function(){ this.demo('grid'); setBatch(true); selected.add(cloudItems[0].key); selected.add(cloudItems[2].key); selected.add(cloudItems[5].key); updateBatchBar(); renderCloud(''); },
     rename:function(){ this.demo('grid'); lbCurrent=cloudItems[0]; openLightbox(cloudItems[0]); document.getElementById('lbRename').click(); },
     qr:function(){ this.demo('grid'); lbCurrent=cloudItems[0]; openLightbox(cloudItems[0]); document.getElementById('lbQr').click(); },
-    drag:function(){ this.demo('grid'); document.querySelectorAll('#dirTabs .tab')[2].classList.add('dropover'); }
+    drag:function(){ this.demo('grid'); document.querySelectorAll('#dirTabs .tab')[2].classList.add('dropover'); },
+    // 上传面板：'run' 进行中（脉冲点+折叠头），'done' 完成态（成功/失败混合+清空按钮）
+    panel:function(state){
+      this.demo('grid');
+      var mk=function(n){ return new File(['x'],n,{type:'application/octet-stream'}); };
+      var a=mk('已完成的资料包.zip'), b=mk('演示视频-分片上传中.mp4');
+      var ia={file:a, el:buildQItem(a)}, ib={file:b, el:buildQItem(b)};
+      queue.appendChild(ia.el); queue.appendChild(ib.el);
+      if(state==='done'){
+        setQ(ia,100,'✓ 完成 · 1 KB → upweb/other','ok');
+        setQ(ib,100,'✗ 网络中断（若反复出现，请检查桶 CORS 配置）','err');
+        updateUpHead();
+      }else{
+        setQ(ia,100,'✓ 完成 · 1 KB → upweb/other','ok');
+        setQ(ib,54,'分片 3/6 上传中 · 54% · 中断后重选本文件可续传');
+        uploading=true; updateUpHead();
+      }
+    }
   };
 })();

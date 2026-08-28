@@ -119,9 +119,38 @@ kbd{
 .switch input:checked::after{transform:translateX(15px)}
 input[type=range]{accent-color:var(--accent);width:110px;vertical-align:middle}
 
-/* ===== 上传队列 ===== */
-#queue{display:none;margin-top:16px;flex-direction:column;gap:10px}
-#queue.has{display:flex}
+/* ===== 上传管理器（右下角浮动面板） ===== */
+#upPanel{
+  position:fixed;right:20px;bottom:20px;z-index:80;width:min(360px,calc(100vw - 40px));
+  background:var(--toast-bg);border:1px solid var(--border);border-radius:16px;
+  box-shadow:0 16px 48px rgba(0,0,0,.45);backdrop-filter:blur(14px);overflow:hidden;
+  opacity:0;visibility:hidden;pointer-events:none;transform:translateY(16px) scale(.98);
+  transition:opacity .24s cubic-bezier(.23,1,.32,1),transform .24s cubic-bezier(.23,1,.32,1),visibility .24s;
+}
+#upPanel.show{opacity:1;visibility:visible;pointer-events:auto;transform:none}
+.up-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:11px 12px 11px 15px;cursor:pointer;user-select:none}
+.up-title{display:flex;align-items:center;gap:9px;font-size:13px;font-weight:600;letter-spacing:.3px;min-width:0}
+#upStatus{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.up-dot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex:none}
+.up-dot.active{animation:uppulse 1.2s ease-in-out infinite}
+.up-dot.ok{background:var(--ok)} .up-dot.err{background:var(--err)}
+@keyframes uppulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(.78)}}
+.up-actions{display:flex;gap:6px;flex:none}
+.up-btn{
+  display:flex;align-items:center;justify-content:center;background:var(--w6);border:1px solid var(--border);
+  color:var(--muted);border-radius:8px;font-size:11.5px;padding:5px 10px;cursor:pointer;
+  transition:transform .16s cubic-bezier(.23,1,.32,1),color .18s,border-color .18s;
+}
+.up-btn:hover{color:var(--text);border-color:var(--border-hover)}
+.up-btn:active{transform:scale(.95)}
+.up-fold{padding:5px 7px}
+.up-fold svg{transition:transform .22s cubic-bezier(.23,1,.32,1)}
+#upPanel.folded .up-fold svg{transform:rotate(180deg)}
+.up-body{display:grid;grid-template-rows:1fr;transition:grid-template-rows .26s cubic-bezier(.23,1,.32,1)}
+#upPanel.folded .up-body{grid-template-rows:0fr}
+#upPanel:not(.folded) .up-body{border-top:1px solid var(--border)}
+.up-clip{overflow:hidden;min-height:0}
+#queue{display:flex;flex-direction:column;gap:10px;padding:12px;overflow-y:auto;max-height:min(42vh,340px)}
 .qitem{
   display:flex;gap:12px;align-items:center;background:var(--w3);
   border:1px solid var(--border);border-radius:12px;padding:10px 14px 10px 10px;
@@ -206,7 +235,7 @@ input[type=range]{accent-color:var(--accent);width:110px;vertical-align:middle}
 .grid[data-view=list] .ftile{width:46px;height:46px;flex:none;gap:2px;padding:2px}
 .grid[data-view=list] .ftile .fico{font-size:20px}
 .grid[data-view=list] .ftile .fext{font-size:8px;letter-spacing:.5px;padding:0 4px}
-.grid[data-view=list] .badge,.grid[data-view=list] .mask{display:none}
+.grid[data-view=list] .badge,.grid[data-view=list] .mask,.grid[data-view=list] .ginfo{display:none}
 .lmeta{display:none}
 .grid[data-view=list] .lmeta{display:flex;flex:1;min-width:0;flex-direction:column;gap:2px;text-align:left}
 .lmeta .lname{font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -236,6 +265,13 @@ input[type=range]{accent-color:var(--accent);width:110px;vertical-align:middle}
 }
 .gitem:hover .mask{opacity:1}
 .gitem .mask span{font-size:10.5px;color:#d8dce8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* 常驻信息条：文件名 + 大小/日期，不再依赖悬停才看得见 */
+.gitem .ginfo{
+  position:absolute;left:0;right:0;bottom:0;z-index:2;pointer-events:none;text-align:left;
+  padding:18px 8px 7px;background:linear-gradient(to top,rgba(6,8,13,.84),rgba(6,8,13,.32) 62%,transparent);
+}
+.gitem .gname{font-size:11px;color:#f2f4fa;line-height:1.45;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gitem .gsub{font-size:9.5px;color:rgba(235,238,246,.62);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .gitem .badge{
   position:absolute;top:7px;left:7px;background:rgba(10,12,18,.72);backdrop-filter:blur(4px);
   border-radius:7px;font-size:10px;padding:3px 8px;color:#cfd6e6;letter-spacing:.3px;pointer-events:none;
@@ -277,15 +313,27 @@ input[type=range]{accent-color:var(--accent);width:110px;vertical-align:middle}
 .lb-file .fname{font-size:14px;word-break:break-all;max-width:60vw}
 .lb-meta{font-size:12.5px;color:var(--muted);margin:14px 0;word-break:break-all;line-height:1.8}
 .lb-ops{display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
-.lb-ops button{
+.lb-ops button,.lb-foot button{
   border:1px solid var(--border);background:var(--w6);color:var(--text);
-  border-radius:10px;padding:9px 18px;font-size:13px;cursor:pointer;transition:.2s;
+  border-radius:10px;padding:9px 18px;font-size:13px;cursor:pointer;
+  transition:transform .16s cubic-bezier(.23,1,.32,1),background .18s,border-color .18s,color .18s,filter .18s;
 }
-.lb-ops button:hover{border-color:var(--border-hover);background:var(--w10)}
-.lb-ops button:disabled{opacity:.6;cursor:wait}
-.lb-ops .danger{color:var(--err)}
-.lb-ops .danger:hover{border-color:rgba(240,100,90,.5);background:rgba(240,100,90,.1)}
-.lb-ops .danger.confirm{background:var(--err);color:#fff;border-color:var(--err)}
+.lb-ops button:hover,.lb-foot button:hover{border-color:var(--border-hover);background:var(--w10)}
+.lb-ops button:active,.lb-foot button:active{transform:scale(.97)}
+.lb-ops button:disabled,.lb-foot button:disabled{opacity:.6;cursor:wait}
+.lb-ops .primary{
+  background:var(--grad);color:#fff;border-color:transparent;font-weight:600;letter-spacing:.3px;
+  box-shadow:0 4px 16px rgba(110,155,255,.32);
+}
+.lb-ops .primary:hover{background:var(--grad);filter:brightness(1.12)}
+/* 危险操作沉底隔离：删除左置、关闭右置，与主操作拉开层级 */
+.lb-foot{
+  display:flex;justify-content:space-between;align-items:center;gap:10px;
+  min-width:min(400px,84vw);margin:14px auto 0;padding-top:14px;border-top:1px solid var(--border);
+}
+.lb-foot .danger{color:var(--err)}
+.lb-foot .danger:hover{border-color:rgba(240,100,90,.5);background:rgba(240,100,90,.1)}
+.lb-foot .danger.confirm{background:var(--err);color:#fff;border-color:var(--err)}
 
 /* ===== 灯箱多格式复制 ===== */
 .fmt-row{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin:0 0 14px}
@@ -389,7 +437,9 @@ footer{margin-top:30px;text-align:center;color:var(--faint);font-size:12px;line-
   .lb-box img,.lb-box video{max-height:58vh}
   .lb-file{padding:28px 20px}
   .lb-meta{margin:10px 0;font-size:12px}
-  .lb-ops button{padding:8px 13px;font-size:12.5px}
+  .lb-ops button,.lb-foot button{padding:8px 13px;font-size:12.5px}
+  #upPanel{right:12px;left:12px;bottom:12px;width:auto}
+  #queue{max-height:38vh}
   .toast{font-size:12.5px;padding:8px 16px}
   .linkrow .fmt{width:64px;font-size:11px}
   .lockbox{padding:34px 22px}
@@ -479,4 +529,11 @@ html[data-theme=light] .gitem.sel .selbox{background:var(--grad);border-color:tr
    造成"搜索框溢出屏幕"的错觉和横向滚动。鼠标设备视觉保持不变。 */
 @media (pointer:coarse){
   .searchbox input,.lockbox input,.rename-row input,.linkrow input,#nmInput{font-size:16px}
+}
+
+/* 减弱动效偏好：保留透明度过渡，去掉位移/折叠/脉冲动画 */
+@media (prefers-reduced-motion:reduce){
+  #upPanel{transition:opacity .2s;transform:none}
+  .up-body,.up-fold svg{transition:none}
+  .up-dot.active{animation:none}
 }

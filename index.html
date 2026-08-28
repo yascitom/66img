@@ -48,12 +48,14 @@
       <button class="fmt-btn" data-fmt="bbcode">BBCode</button>
     </div>
     <div class="lb-ops">
-      <button id="lbCopy">复制链接</button>
+      <button id="lbCopy" class="primary">复制链接</button>
       <button id="lbQr">二维码</button>
       <button id="lbOpen" style="display:none">打开 / 下载</button>
-      <button id="lbRename">重命名</button>
       <button id="lbDownload">下载</button>
-      <button id="lbDelete" class="danger">删除</button>
+      <button id="lbRename">重命名</button>
+    </div>
+    <div class="lb-foot">
+      <button id="lbDelete" class="danger">删除文件</button>
       <button id="lbClose">关闭</button>
     </div>
   </div>
@@ -113,8 +115,6 @@
       <label class="switch"><input type="checkbox" id="webpToggle"> 图片智能压缩为 WebP（默认关闭，原图直传）</label>
       <label>画质 <input type="range" id="quality" min="10" max="100" value="82"> <span id="qualityVal">82</span>%</label>
     </div>
-
-    <div id="queue"></div>
   </div>
 
   <!-- 云端文件 -->
@@ -176,6 +176,24 @@
       云窝 yunwo · GitHub 开源
     </a>
   </footer>
+</div>
+
+<!-- 上传管理器：右下角浮动面板，大文件长传时可继续浏览云端文件 -->
+<div id="upPanel">
+  <div class="up-head" id="upHead">
+    <div class="up-title"><span class="up-dot" id="upDot"></span><span id="upStatus">上传队列</span></div>
+    <div class="up-actions">
+      <button class="up-btn" id="upClear" style="display:none">清空</button>
+      <button class="up-btn up-fold" id="upFoldBtn" title="折叠 / 展开">
+        <svg width="12" height="12" viewBox="0 0 12 12"><path d="M2.5 4.5 6 8l3.5-3.5" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+    </div>
+  </div>
+  <div class="up-body">
+    <div class="up-clip">
+      <div id="queue"></div>
+    </div>
+  </div>
 </div>
 
 <script src="vendor/qrcode.min.js"></script>
