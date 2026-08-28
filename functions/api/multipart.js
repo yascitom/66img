@@ -271,7 +271,7 @@ async function fetchWithRetry(url, options) {
 //   <StringToSign>（OSS 按实际收到的请求算出的待签串）重签重试一次，
 //   可自动适应边缘运行时对请求头的任何改写。
 // ------------------------------------------------------------
-async function ossRequest(env, method, key, subResource, contentType, bodyText, forbidOverwrite) {
+async function ossRequest(env, method, key, subResource, contentType, bodyText, forbidOverwrite, extraHeaders) {
   const bucket = env.OSS_BUCKET;
   const endpoint = env.OSS_ENDPOINT;
   const url = `https://${bucket}.${endpoint}/${encodeKeyPath(key)}${subResource}`;
@@ -288,6 +288,8 @@ async function ossRequest(env, method, key, subResource, contentType, bodyText, 
   };
   if (forbidOverwrite) headers['x-oss-forbid-overwrite'] = 'true';
   if (contentType) headers['Content-Type'] = contentType;
+  // extraHeaders 为不参与 V1 签名的普通请求头（如 Range），由调用方保证不含 x-oss- 前缀
+  if (extraHeaders) Object.assign(headers, extraHeaders);
 
   let r = await fetchWithRetry(url, { method, headers, body: bodyText || undefined });
   let xml = await r.text();
@@ -324,27 +326,19 @@ async function ossRequest(env, method, key, subResource, contentType, bodyText, 
 }
 
 // ------------------------------------------------------------
-// 对象存在性检查：GET + Range: bytes=0-0（独立于 ossRequest，因为要多带一个 Range 头）
+// 对象存在性检查：GET + Range: bytes=0-0（复用 ossRequest 的签名自愈与超时重试）
 // 存在 → 206（1 字节 body）；不存在 → 404（NoSuchKey）；0 字节对象 → 416（InvalidRange，同样证明存在）。
 // Range 是普通请求头，不参与 V1 签名计算；响应一律有 body，边缘运行时不会干等。
 // ------------------------------------------------------------
 async function ossObjectExists(env, key) {
-  const bucket = env.OSS_BUCKET;
-  const endpoint = env.OSS_ENDPOINT;
-  const url = `https://${bucket}.${endpoint}/${encodeKeyPath(key)}`;
-  const date = new Date().toUTCString();
-  const stringToSign = `GET\n\n\n\nx-oss-date:${date}\n/${bucket}/${key}`;
-  const headers = {
-    'x-oss-date': date,
-    Range: 'bytes=0-0',
-    Authorization: `OSS ${env.OSS_ACCESS_KEY_ID}:${await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, stringToSign)}`,
-  };
-  const r = await fetchWithRetry(url, { method: 'GET', headers });
-  if (r.status === 206 || r.status === 416) return true;
-  if (r.status === 404) return false;
-  const xml = await r.text();
-  const code = (xml.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
-  throw new Error('OSS 存在性检查失败：' + code);
+  try {
+    await ossRequest(env, 'GET', key, '', '', null, false, { Range: 'bytes=0-0' });
+    return true; // 2xx（206 Partial Content）→ 存在
+  } catch (e) {
+    if (/NoSuchKey|404|NoSuchObject/.test(e.message)) return false;
+    if (/InvalidRange|416/.test(e.message)) return true; // 0 字节对象：416 同样证明存在
+    throw e;
+  }
 }
 
 // ------------------------------------------------------------

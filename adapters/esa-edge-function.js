@@ -766,7 +766,7 @@ async function fetchWithRetry(url, options) {
 
 // 服务端签名直调 OSS（init/complete/abort），V1 Header 签名 + 签名自愈重试
 // forbidOverwrite=true 时带 x-oss-forbid-overwrite（complete 防静默覆盖用；字典序 x-oss-date < x-oss-forbid-overwrite）
-async function ossRequest(method, key, subResource, contentType, bodyText, forbidOverwrite) {
+async function ossRequest(method, key, subResource, contentType, bodyText, forbidOverwrite, extraHeaders) {
   const bucket = getEnv('OSS_BUCKET');
   const endpoint = getEnv('OSS_ENDPOINT');
   const url = `https://${bucket}.${endpoint}/${encodeKeyPath(key)}${subResource}`;
@@ -780,6 +780,8 @@ async function ossRequest(method, key, subResource, contentType, bodyText, forbi
   };
   if (forbidOverwrite) headers['x-oss-forbid-overwrite'] = 'true';
   if (contentType) headers['Content-Type'] = contentType;
+  // extraHeaders 为不参与 V1 签名的普通请求头（如 Range），由调用方保证不含 x-oss- 前缀
+  if (extraHeaders) Object.assign(headers, extraHeaders);
   let r = await fetchWithRetry(url, { method, headers, body: bodyText || undefined });
   let xml = await r.text();
   if (!r.ok) {
@@ -812,26 +814,18 @@ async function ossRequest(method, key, subResource, contentType, bodyText, forbi
   return xml;
 }
 
-// 对象存在性检查：GET + Range: bytes=0-0（独立于 ossRequest，因为要多带一个 Range 头）
+// 对象存在性检查：GET + Range: bytes=0-0（复用 ossRequest 的签名自愈与超时重试）
 // 存在 → 206（1 字节 body）；不存在 → 404（NoSuchKey）；0 字节对象 → 416（InvalidRange，同样证明存在）。
 // Range 是普通请求头，不参与 V1 签名计算；响应一律有 body，边缘运行时不会干等。
 async function ossObjectExists(key) {
-  const bucket = getEnv('OSS_BUCKET');
-  const endpoint = getEnv('OSS_ENDPOINT');
-  const url = `https://${bucket}.${endpoint}/${encodeKeyPath(key)}`;
-  const date = new Date().toUTCString();
-  const stringToSign = `GET\n\n\n\nx-oss-date:${date}\n/${bucket}/${key}`;
-  const headers = {
-    'x-oss-date': date,
-    Range: 'bytes=0-0',
-    Authorization: `OSS ${getEnv('OSS_ACCESS_KEY_ID')}:${await hmacSha1Base64(getEnv('OSS_ACCESS_KEY_SECRET'), stringToSign)}`,
-  };
-  const r = await fetchWithRetry(url, { method: 'GET', headers });
-  if (r.status === 206 || r.status === 416) return true;
-  if (r.status === 404) return false;
-  const xml = await r.text();
-  const code = (xml.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
-  throw new Error('OSS 存在性检查失败：' + code);
+  try {
+    await ossRequest('GET', key, '', '', null, false, { Range: 'bytes=0-0' });
+    return true; // 2xx（206 Partial Content）→ 存在
+  } catch (e) {
+    if (/NoSuchKey|404|NoSuchObject/.test(e.message)) return false;
+    if (/InvalidRange|416/.test(e.message)) return true; // 0 字节对象：416 同样证明存在
+    throw e;
+  }
 }
 
 // 为单个分片签发预签名 URL（V1 URL 签名）
