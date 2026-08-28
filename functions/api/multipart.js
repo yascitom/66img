@@ -324,6 +324,30 @@ async function ossRequest(env, method, key, subResource, contentType, bodyText, 
 }
 
 // ------------------------------------------------------------
+// 对象存在性检查：GET + Range: bytes=0-0（独立于 ossRequest，因为要多带一个 Range 头）
+// 存在 → 206（1 字节 body）；不存在 → 404（NoSuchKey）；0 字节对象 → 416（InvalidRange，同样证明存在）。
+// Range 是普通请求头，不参与 V1 签名计算；响应一律有 body，边缘运行时不会干等。
+// ------------------------------------------------------------
+async function ossObjectExists(env, key) {
+  const bucket = env.OSS_BUCKET;
+  const endpoint = env.OSS_ENDPOINT;
+  const url = `https://${bucket}.${endpoint}/${encodeKeyPath(key)}`;
+  const date = new Date().toUTCString();
+  const stringToSign = `GET\n\n\n\nx-oss-date:${date}\n/${bucket}/${key}`;
+  const headers = {
+    'x-oss-date': date,
+    Range: 'bytes=0-0',
+    Authorization: `OSS ${env.OSS_ACCESS_KEY_ID}:${await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, stringToSign)}`,
+  };
+  const r = await fetchWithRetry(url, { method: 'GET', headers });
+  if (r.status === 206 || r.status === 416) return true;
+  if (r.status === 404) return false;
+  const xml = await r.text();
+  const code = (xml.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
+  throw new Error('OSS 存在性检查失败：' + code);
+}
+
+// ------------------------------------------------------------
 // 为单个分片签发「预签名 URL」（V1 URL 签名，浏览器直传用）
 // StringToSign = PUT\n\n{Content-Type}\n{Expires}\n/{bucket}/{key}?partNumber={n}&uploadId={id}
 // （子资源按名称排序：partNumber < uploadId）
@@ -388,16 +412,13 @@ async function handle(request, env) {
       // 保留原文件名时做存在性预检（提前 409，避免白传分片）；
       // complete 另带 x-oss-forbid-overwrite 硬兜底，堵住「预检→合并」时间窗内的静默覆盖。
       // 预检需要 RAM 授权 oss:GetObject。随机 UUID key 几乎不可能碰撞，跳过预检省一次请求。
-      // ⚠️ 预检必须用 HEAD（HeadObject），不能用 GET ?objectMeta：
-      // objectMeta 的 200 响应头 Content-Length 是对象大小却没有响应体，
-      // EO/ESA 边缘运行时的 fetch 会干等 body 直至平台超时（net_exception_timeout）；
-      // HEAD 语义上无响应体，读完响应头即结束。404 时 ossRequest 抛「…404」落入 catch 放行。
+      // ⚠️ 存在性检查的方式踩过两个坑，最终选 GET + Range: bytes=0-0：
+      //  - GET ?objectMeta：200 响应头 Content-Length 是对象大小却无响应体，EO/ESA 边缘 fetch 干等 body 直至平台超时（net_exception_timeout）
+      //  - HEAD（HeadObject）：本链路 403，且 HEAD 错误按 HTTP 语义无响应体，拿不到 OSS 错误码
+      //  Range 是普通请求头不进 V1 签名；存在→206（1 字节 body 正常结束）、不存在→404（XML 错误体）、0 字节对象→416（同样证明存在）
       if (body.keepName === true) {
-        try {
-          await ossRequest(env, 'HEAD', key, '', '', null);
+        if (await ossObjectExists(env, key)) {
           return jsonResponse({ error: `同名文件已存在：${key.split('/').pop()}（请先重命名或删除旧文件）`, code: 'CONFLICT' }, 409);
-        } catch (e) {
-          if (!/NoSuchKey|404|NoSuchObject/.test(e.message)) throw e; // 非「不存在」错误（如权限不足）如实上报
         }
       }
 
@@ -512,13 +533,9 @@ async function handle(request, env) {
       } catch (e) {
         // 「合并其实成功但响应丢失」场景：重试时 uploadId 已被消费，OSS 返回 NoSuchUpload。
         // 此时若对象已存在，说明上次合并已成功——按成功处理，避免前端整包重传。
-        // 存在性检查用 HEAD（原因见 init 预检注释：objectMeta 的无体 200 响应会让边缘 fetch 干等超时）
+        // 存在性检查方式见 ossObjectExists 注释（objectMeta 干等超时 / HEAD 403 两个坑）
         if (!/NoSuchUpload/.test(e.message)) throw e;
-        try {
-          await ossRequest(env, 'HEAD', key, '', '', null);
-        } catch (e2) {
-          throw e; // 对象不存在 → 会话确实已失效，抛原始错误
-        }
+        if (!(await ossObjectExists(env, key))) throw e; // 对象不存在 → 会话确实已失效，抛原始错误
       }
 
       return jsonResponse({
