@@ -303,6 +303,7 @@
   async function cancelItem(item){
     if(item.state==='done'||item.state==='err'){ item.el.remove(); updateUpHead(); return; }
     item.cancelled=true;
+    item.paused=false; // 取消优先于暂停：清掉暂停标记，上传循环只按 CANCELLED 收尾，避免出现「暂停态但会话已被 Abort」的死状态
     const i=pending.indexOf(item); if(i>=0) pending.splice(i,1);
     if(item.currentXhr){ try{item.currentXhr.abort();}catch(e){} }
     const fp=fpOf(item.file), task=getMpTasks()[fp];
@@ -617,7 +618,8 @@
   function getMpTasks(){ try{return JSON.parse(localStorage.getItem(MP_KEY))||{}}catch(e){return{}} }
   function saveMpTask(fp, task){ const all=getMpTasks(); all[fp]=task; localStorage.setItem(MP_KEY, JSON.stringify(all)); }
   function delMpTask(fp){ const all=getMpTasks(); delete all[fp]; localStorage.setItem(MP_KEY, JSON.stringify(all)); }
-  function fpOf(file){ return file.name+'_'+file.size; }
+  // 加 lastModified 防「同名同大小的不同文件」共享续传进度（旧格式任务自然失效，无碍）
+  function fpOf(file){ return file.name+'_'+file.size+'_'+file.lastModified; }
 
   async function mpApi(payload){
     const r=await fetch('/api/multipart',{
@@ -1020,6 +1022,7 @@
         const data=await r.json().catch(()=>({}));
         if(r.status===401){ authExpired(); throw new Error('登录已过期，请重新输入密码'); }
         if(!r.ok) throw new Error(data.error||('移动失败 '+r.status));
+        if(data.warn) toast(f.key.split('/').pop()+'：'+data.warn,'err'); // 服务端兜底：新文件成功但旧文件删除失败（用移动前的旧文件名提示）
         f.key=data.key; f.url=data.url;
         selected.delete(data.oldKey||'');
         ok++;
@@ -1206,6 +1209,7 @@
       const media=lbMedia.querySelector('img,video');
       if(media) media.src=data.url;
       toast('已重命名为 '+name,'ok');
+      if(data.warn) toast(data.warn,'err'); // 服务端兜底：新文件成功但旧文件删除失败（新旧并存）
     }catch(e){
       toast(e.message,'err');
     }finally{

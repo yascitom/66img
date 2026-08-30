@@ -176,7 +176,7 @@ function badInput(body) {
   if (Array.isArray(body.parts) && body.parts.length > 10000) return '参数非法';
   return '';
 }
-// 分片合并请求可能携带较多 ETag，上限放宽到 256KB
+// 分片合并请求可能携带较多 ETag：上限放宽到 1MB（OSS 最多 10000 分片 × 每片约 60B JSON ≈ 600KB）
 // 读取并校验请求体：Content-Length 超限走快路径直接 413（不用读 body）；
 // 头缺失/不可信（chunked 分块传输没有此头）时按实际读入的字节数兜底，杜绝绕过
 // 返回 { body } 或 { err: Response }
@@ -374,7 +374,7 @@ async function handle(request, env) {
   const cfgErr = authConfigError(env);
   if (cfgErr) return jsonResponse({ error: cfgErr }, 500);
 
-  const { body, err } = await readJsonBody(request, 256 * 1024);
+  const { body, err } = await readJsonBody(request, 1024 * 1024);
   if (err) return err;
   const inputErr = badInput(body);
   if (inputErr) return jsonResponse({ error: inputErr }, 400);

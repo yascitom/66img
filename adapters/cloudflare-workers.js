@@ -245,7 +245,7 @@ async function listObjects(env, token, dir) {
     'x-oss-date': date,
     Authorization: `OSS ${env.OSS_ACCESS_KEY_ID}:${await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, myStringToSign)}`,
   };
-  let r = await fetch(url, { headers });
+  let r = await fetchWithRetry(url, { headers });
   let xml = await r.text();
   if (!r.ok) {
     const code = (xml.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
@@ -253,7 +253,7 @@ async function listObjects(env, token, dir) {
     if (code === 'SignatureDoesNotMatch' && ossString) {
       const ossStr = xmlUnescape(ossString);
       headers.Authorization = `OSS ${env.OSS_ACCESS_KEY_ID}:${await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, ossStr)}`;
-      r = await fetch(url, { headers });
+      r = await fetchWithRetry(url, { headers });
       xml = await r.text();
       if (!r.ok) {
         const code2 = (xml.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
@@ -310,7 +310,7 @@ async function deleteObject(env, key) {
     'x-oss-date': date,
     Authorization: `OSS ${env.OSS_ACCESS_KEY_ID}:${await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, myStringToSign)}`,
   };
-  let r = await fetch(url, { method: 'DELETE', headers });
+  let r = await fetchWithRetry(url, { method: 'DELETE', headers });
   if (!r.ok && r.status !== 204) {
     const xml = await r.text();
     const code = (xml.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
@@ -318,7 +318,7 @@ async function deleteObject(env, key) {
     if (code === 'SignatureDoesNotMatch' && ossString) {
       const ossStr = xmlUnescape(ossString);
       headers.Authorization = `OSS ${env.OSS_ACCESS_KEY_ID}:${await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, ossStr)}`;
-      r = await fetch(url, { method: 'DELETE', headers });
+      r = await fetchWithRetry(url, { method: 'DELETE', headers });
       if (!r.ok && r.status !== 204) {
         const xml2 = await r.text();
         const code2 = (xml2.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
@@ -378,7 +378,7 @@ async function copyObject(env, oldKey, newKey) {
     'x-oss-forbid-overwrite': 'true',
     Authorization: `OSS ${env.OSS_ACCESS_KEY_ID}:${await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, myStringToSign)}`,
   };
-  let r = await fetch(url, { method: 'PUT', headers });
+  let r = await fetchWithRetry(url, { method: 'PUT', headers });
   if (!r.ok) {
     const xml = await r.text();
     const code = (xml.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
@@ -387,7 +387,7 @@ async function copyObject(env, oldKey, newKey) {
     if (code === 'SignatureDoesNotMatch' && ossString) {
       const ossStr = xmlUnescape(ossString);
       headers.Authorization = `OSS ${env.OSS_ACCESS_KEY_ID}:${await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, ossStr)}`;
-      r = await fetch(url, { method: 'PUT', headers });
+      r = await fetchWithRetry(url, { method: 'PUT', headers });
       if (!r.ok) {
         const code2 = ((await r.text()).match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
         if (code2 === 'FileAlreadyExists') { const e = new Error('目标文件名已存在，请换一个名字'); e.code = 'CONFLICT'; throw e; }
@@ -459,8 +459,15 @@ async function handleRename(request, env) {
   }
   try {
     await copyObject(env, key, newKey);
-    await deleteObject(env, key);
-    return jsonResponse({ ok: true, key: newKey, oldKey: key, url: env.PUBLIC_URL_BASE.replace(/\/$/, '') + '/' + encodeKeyPath(newKey) });
+    const okUrl = env.PUBLIC_URL_BASE.replace(/\/$/, '') + '/' + encodeKeyPath(newKey);
+    try {
+      await deleteObject(env, key);
+    } catch (e2) {
+      // 新 key 已复制成功、旧 key 删除失败：不谎报失败（新文件已可用），
+      // 返回成功并带 warn，由前端提示用户手动清理旧文件，避免「失败→重试→更多残留」
+      return jsonResponse({ ok: true, key: newKey, oldKey: key, warn: '新文件已完成，但旧文件删除失败（新旧两份并存），请稍后手动删除旧文件', url: okUrl });
+    }
+    return jsonResponse({ ok: true, key: newKey, oldKey: key, url: okUrl });
   } catch (e) {
     return jsonResponse({ error: e.message }, e.code === 'CONFLICT' ? 409 : 502);
   }
@@ -593,7 +600,8 @@ async function handleMultipart(request, env) {
   }
   const cfgErr = authConfigError(env);
   if (cfgErr) return jsonResponse({ error: cfgErr }, 500);
-  const { body, err } = await readJsonBody(request, 256 * 1024);
+  // 上限放宽到 1MB（OSS 最多 10000 分片 × 每片约 60B JSON ≈ 600KB）
+  const { body, err } = await readJsonBody(request, 1024 * 1024);
   if (err) return err;
   const inputErr = badInput(body);
   if (inputErr) return jsonResponse({ error: inputErr }, 400);
@@ -836,7 +844,7 @@ async function putObject(env, key, bytes, contentType) {
     'Content-Type': contentType,
     Authorization: `OSS ${env.OSS_ACCESS_KEY_ID}:${await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, myStringToSign)}`,
   };
-  let r = await fetch(url, { method: 'PUT', headers, body: bytes });
+  let r = await fetchWithRetry(url, { method: 'PUT', headers, body: bytes });
   let xml = await r.text();
   if (!r.ok) {
     const code = (xml.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
@@ -844,7 +852,7 @@ async function putObject(env, key, bytes, contentType) {
     if (code === 'SignatureDoesNotMatch' && ossString) {
       const ossStr = xmlUnescape(ossString);
       headers.Authorization = `OSS ${env.OSS_ACCESS_KEY_ID}:${await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, ossStr)}`;
-      r = await fetch(url, { method: 'PUT', headers, body: bytes });
+      r = await fetchWithRetry(url, { method: 'PUT', headers, body: bytes });
       xml = await r.text();
       if (!r.ok) {
         const code2 = (xml.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;

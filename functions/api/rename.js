@@ -38,6 +38,31 @@ function encodeKeyPath(key) {
   return key.split('/').map(encodeURIComponent).join('/');
 }
 
+// ------------------------------------------------------------
+// 带超时与瞬时故障重试的 fetch（与 multipart.js 相同实现）：
+// 边缘运行时到 OSS 的子请求偶发 net_exception_timeout 等网络抖动，仅网络层错误重试；
+// OSS 已应答的业务错误（4xx 等）不在此层处理，交由下方错误分支判断。
+// ------------------------------------------------------------
+const OSS_FETCH_TIMEOUT_MS = 15000;
+const OSS_FETCH_TRIES = 3;
+
+async function fetchWithRetry(url, options) {
+  let lastErr = null;
+  for (let attempt = 1; attempt <= OSS_FETCH_TRIES; attempt++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), OSS_FETCH_TIMEOUT_MS);
+    try {
+      return await fetch(url, Object.assign({}, options, { signal: ctrl.signal }));
+    } catch (e) {
+      lastErr = e;
+      if (attempt < OSS_FETCH_TRIES) await new Promise(r => setTimeout(r, 400 * attempt));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw new Error('OSS 子请求连续失败（含超时重试）：' + ((lastErr && lastErr.message) || lastErr));
+}
+
 // OSS CopyObject（同桶复制，改名前半步）
 // StringToSign = PUT\n\n\n\nx-oss-copy-source:<src>\nx-oss-date:<date>\nx-oss-forbid-overwrite:true\n/<bucket>/<newKey>
 // x-oss-forbid-overwrite:true —— 目标已存在则拒绝，防止改名覆盖掉别的文件
@@ -60,7 +85,7 @@ async function copyObject(env, oldKey, newKey) {
     Authorization: `OSS ${env.OSS_ACCESS_KEY_ID}:${await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, myStringToSign)}`,
   };
 
-  let r = await fetch(url, { method: 'PUT', headers });
+  let r = await fetchWithRetry(url, { method: 'PUT', headers });
 
   if (!r.ok) {
     const xml = await r.text();
@@ -75,7 +100,7 @@ async function copyObject(env, oldKey, newKey) {
     if (code === 'SignatureDoesNotMatch' && ossString) {
       const ossStr = xmlUnescape(ossString);
       headers.Authorization = `OSS ${env.OSS_ACCESS_KEY_ID}:${await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, ossStr)}`;
-      r = await fetch(url, { method: 'PUT', headers });
+      r = await fetchWithRetry(url, { method: 'PUT', headers });
       if (!r.ok) {
         const xml2 = await r.text();
         const code2 = (xml2.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
@@ -105,7 +130,7 @@ async function deleteObject(env, key) {
     Authorization: `OSS ${env.OSS_ACCESS_KEY_ID}:${await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, myStringToSign)}`,
   };
 
-  let r = await fetch(url, { method: 'DELETE', headers });
+  let r = await fetchWithRetry(url, { method: 'DELETE', headers });
 
   if (!r.ok && r.status !== 204) {
     const xml = await r.text();
@@ -114,7 +139,7 @@ async function deleteObject(env, key) {
     if (code === 'SignatureDoesNotMatch' && ossString) {
       const ossStr = xmlUnescape(ossString);
       headers.Authorization = `OSS ${env.OSS_ACCESS_KEY_ID}:${await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, ossStr)}`;
-      r = await fetch(url, { method: 'DELETE', headers });
+      r = await fetchWithRetry(url, { method: 'DELETE', headers });
       if (!r.ok && r.status !== 204) {
         const code2 = ((await r.text()).match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
         throw new Error('OSS 删除旧文件失败：' + code2);
@@ -160,6 +185,12 @@ function authConfigError(env) {
 function b64urlEncode(s) { return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
 function b64urlDecode(s) { return atob(s.replace(/-/g, '+').replace(/_/g, '/')); }
 
+// payload 可能含中日韩 key，JSON 解码须走 UTF-8 字节（atob 只认 Latin-1）；与 sign.js 相同实现
+function b64urlJsonDecode(s) {
+  const bin = atob(s.replace(/-/g, '+').replace(/_/g, '/'));
+  return JSON.parse(new TextDecoder().decode(Uint8Array.from(bin, c => c.charCodeAt(0))));
+}
+
 async function hmacSha256B64url(secret, message) {
   const enc = new TextEncoder();
   const key = await crypto.subtle.importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
@@ -174,7 +205,7 @@ async function readToken(token, secret) {
   const body = token.slice(0, i);
   if ((await hmacSha256B64url(secret, body)) !== token.slice(i + 1)) return null;
   try {
-    const p = JSON.parse(b64urlDecode(body));
+    const p = b64urlJsonDecode(body);
     if (!p || typeof p.e !== 'number' || p.e < Math.floor(Date.now() / 1000)) return null;
     return p;
   } catch { return null; }
@@ -300,13 +331,21 @@ async function handle(request, env) {
 
   try {
     await copyObject(env, key, newKey);
-    await deleteObject(env, key);
-    return jsonResponse({
-      ok: true,
-      key: newKey,
-      oldKey: key,
-      url: env.PUBLIC_URL_BASE.replace(/\/$/, '') + '/' + encodeKeyPath(newKey),
-    });
+    const okUrl = env.PUBLIC_URL_BASE.replace(/\/$/, '') + '/' + encodeKeyPath(newKey);
+    try {
+      await deleteObject(env, key);
+    } catch (e2) {
+      // 新 key 已复制成功、旧 key 删除失败：不谎报失败（新文件已可用），
+      // 返回成功并带 warn，由前端提示用户手动清理旧文件，避免「失败→重试→更多残留」
+      return jsonResponse({
+        ok: true,
+        key: newKey,
+        oldKey: key,
+        warn: '新文件已完成，但旧文件删除失败（新旧两份并存），请稍后手动删除旧文件',
+        url: okUrl,
+      });
+    }
+    return jsonResponse({ ok: true, key: newKey, oldKey: key, url: okUrl });
   } catch (e) {
     return jsonResponse({ error: e.message }, e.code === 'CONFLICT' ? 409 : 502);
   }

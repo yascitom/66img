@@ -245,7 +245,7 @@ async function handle(request, env) {
   }
 
   const size = parseInt(body.size, 10) || 0;
-  if (size <= 0 || size > maxSize) {
+  if (size < 0 || size > maxSize) {
     return jsonResponse({ error: `文件大小超限（上限 ${maxMB}MB）` }, 400);
   }
 
@@ -257,7 +257,7 @@ async function handle(request, env) {
     expiration: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
     conditions: [
       { bucket: env.OSS_BUCKET },
-      ['content-length-range', 1, maxSize],
+      ['content-length-range', 0, maxSize],
       ['eq', '$key', objectKey],
       ['eq', '$x-oss-forbid-overwrite', 'true'],
     ],

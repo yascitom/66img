@@ -32,6 +32,31 @@ function xmlUnescape(s) {
     .replace(/&amp;/g, '&');
 }
 
+// ------------------------------------------------------------
+// 带超时与瞬时故障重试的 fetch（与 multipart.js 相同实现）：
+// 边缘运行时到 OSS 的子请求偶发 net_exception_timeout 等网络抖动，仅网络层错误重试；
+// OSS 已应答的业务错误（4xx 等）不在此层处理，交由下方错误分支判断。
+// ------------------------------------------------------------
+const OSS_FETCH_TIMEOUT_MS = 15000;
+const OSS_FETCH_TRIES = 3;
+
+async function fetchWithRetry(url, options) {
+  let lastErr = null;
+  for (let attempt = 1; attempt <= OSS_FETCH_TRIES; attempt++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), OSS_FETCH_TIMEOUT_MS);
+    try {
+      return await fetch(url, Object.assign({}, options, { signal: ctrl.signal }));
+    } catch (e) {
+      lastErr = e;
+      if (attempt < OSS_FETCH_TRIES) await new Promise(r => setTimeout(r, 400 * attempt));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw new Error('OSS 子请求连续失败（含超时重试）：' + ((lastErr && lastErr.message) || lastErr));
+}
+
 // OSS DeleteObject。使用 x-oss-date 替代 Date 头（边缘运行时会改写 Date），
 // StringToSign = DELETE\n\n\n\nx-oss-date:<date>\n/<bucket>/<key>
 //
@@ -48,7 +73,7 @@ async function deleteObject(env, key) {
     Authorization: `OSS ${env.OSS_ACCESS_KEY_ID}:${await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, myStringToSign)}`,
   };
 
-  let r = await fetch(url, { method: 'DELETE', headers });
+  let r = await fetchWithRetry(url, { method: 'DELETE', headers });
 
   if (!r.ok && r.status !== 204) {
     const xml = await r.text();
@@ -58,7 +83,7 @@ async function deleteObject(env, key) {
     if (code === 'SignatureDoesNotMatch' && ossString) {
       const ossStr = xmlUnescape(ossString);
       headers.Authorization = `OSS ${env.OSS_ACCESS_KEY_ID}:${await hmacSha1Base64(env.OSS_ACCESS_KEY_SECRET, ossStr)}`;
-      r = await fetch(url, { method: 'DELETE', headers });
+      r = await fetchWithRetry(url, { method: 'DELETE', headers });
       if (!r.ok && r.status !== 204) {
         const xml2 = await r.text();
         const code2 = (xml2.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
@@ -107,6 +132,12 @@ function authConfigError(env) {
 function b64urlEncode(s) { return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
 function b64urlDecode(s) { return atob(s.replace(/-/g, '+').replace(/_/g, '/')); }
 
+// payload 可能含中日韩 key，JSON 解码须走 UTF-8 字节（atob 只认 Latin-1）；与 sign.js 相同实现
+function b64urlJsonDecode(s) {
+  const bin = atob(s.replace(/-/g, '+').replace(/_/g, '/'));
+  return JSON.parse(new TextDecoder().decode(Uint8Array.from(bin, c => c.charCodeAt(0))));
+}
+
 async function hmacSha256B64url(secret, message) {
   const enc = new TextEncoder();
   const key = await crypto.subtle.importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
@@ -121,7 +152,7 @@ async function readToken(token, secret) {
   const body = token.slice(0, i);
   if ((await hmacSha256B64url(secret, body)) !== token.slice(i + 1)) return null;
   try {
-    const p = JSON.parse(b64urlDecode(body));
+    const p = b64urlJsonDecode(body);
     if (!p || typeof p.e !== 'number' || p.e < Math.floor(Date.now() / 1000)) return null;
     return p;
   } catch { return null; }

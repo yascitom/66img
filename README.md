@@ -43,10 +43,11 @@
 │   ├── list.js                   # 列出桶内文件（支持目录参数）
 │   ├── delete.js                 # 删除桶内文件
 │   ├── rename.js                 # 重命名文件（同目录 CopyObject + 删除旧 key）
-│   └── multipart.js              # 大文件分片上传（init/part签名/complete/abort）
+│   ├── multipart.js              # 大文件分片上传（init/part签名/complete/abort）
+│   └── upload.js                 # PicGo / 第三方客户端兼容上传（服务端 PutObject，函数会读入文件内容）
 └── adapters/
-    ├── cloudflare-workers.js     # Cloudflare Workers 独立版（含全部五个接口）
-    └── esa-edge-function.js      # 阿里云 ESA 边缘函数版（含全部五个接口）
+    ├── cloudflare-workers.js     # Cloudflare Workers 独立版（含全部六个接口）
+    └── esa-edge-function.js      # 阿里云 ESA 边缘函数版（含全部六个接口）
 ```
 
 ## 准备工作（先完成免流教程）
@@ -127,6 +128,7 @@
 |---|---|---|
 | `/api/sign` | POST | 小文件上传签名（PostObject Policy，**bucket + key 精确绑定**本次生成的对象键 + 防覆盖条件写入签名）；`{check:true}` 时为身份预检，**仅密码验证通过才签发 7 天登录令牌，持令牌预检不续签** |
 | `/api/multipart` | POST | 大文件分片上传：`action=init` 初始化（返回 uploadId+key+partSize+**会话令牌**）；`action=part` 为单个分片签发 1 小时有效的预签名 URL（校验会话令牌，分片号不得超声明上限）；`action=complete` 合并分片（先 ListParts **逐片核验**分片号/ETag/字节数与 init 声明完全一致，不符自动 Abort 清理）；`action=abort` 清理残留分片。全程密钥不出服务端 |
+| `/api/upload` | POST | PicGo / 第三方客户端兼容上传：multipart/form-data 字段名 `file`，服务端签名后 PutObject 直写 OSS（`x-oss-forbid-overwrite` 防覆盖，同名 409）；鉴权支持 `Authorization: Bearer <密码或令牌>` / `x-yunwo-password` 头 / 表单字段；⚠️ 与其他接口不同，**文件内容会读入函数内存**（请求体硬上限 maxSize+2MB），大文件请走 `/api/sign` 或 `/api/multipart` 直传 |
 | `/api/list` | POST | 列出文件，`{auth, token?, dir?}`（token 为分页游标），dir ∈ `all/img/video/other`，每页 60 条 |
 | `/api/delete` | POST | 删除文件，`{auth, key}`，仅允许 `upweb/` 前缀 |
 | `/api/rename` | POST | 重命名文件，`{auth, key, name}`（新文件名，含扩展名）：同目录 CopyObject（`x-oss-forbid-overwrite` 防覆盖，重名返回 409）+ 删除旧 key，新名字限定 `A-Za-z0-9._-` 字符集 |
