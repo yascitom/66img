@@ -33,10 +33,12 @@
 
 <!-- 灯箱 -->
 <div id="lightbox">
-  <button class="lb-nav prev" id="lbPrev" aria-label="上一个">‹</button>
-  <button class="lb-nav next" id="lbNext" aria-label="下一个">›</button>
   <div class="lb-box">
-    <div id="lbMedia"></div>
+    <div class="lb-stage">
+      <div id="lbMedia"></div>
+      <button class="lb-nav prev" id="lbPrev" aria-label="上一个">‹</button>
+      <button class="lb-nav next" id="lbNext" aria-label="下一个">›</button>
+    </div>
     <div class="lb-meta" id="lbMeta"></div>
     <div class="rename-row" id="lbRenameRow" style="display:none">
       <input type="text" id="lbRenameInput" spellcheck="false" maxlength="200" placeholder="新文件名（含扩展名）">

@@ -349,20 +349,21 @@ input[type=range]{accent-color:var(--accent);width:110px;vertical-align:middle}
 .fmt-btn:hover{color:var(--text);border-color:var(--border-hover)}
 .fmt-btn.active{background:var(--grad);color:#fff;border-color:transparent;box-shadow:0 2px 10px rgba(110,155,255,.35)}
 
-/* ===== 灯箱左右切换 ===== */
+/* ===== 灯箱左右切换（箭头浮在媒体左右边缘，始终跟着内容走） ===== */
+.lb-stage{position:relative;display:inline-block;max-width:100%}
 .lb-nav{
-  position:fixed;top:50%;transform:translateY(-50%);z-index:92;
-  width:44px;height:44px;border-radius:50%;border:1px solid var(--border);
-  background:var(--toast-bg);backdrop-filter:blur(10px);color:var(--text);
-  font-size:22px;line-height:1;cursor:pointer;display:none;align-items:center;justify-content:center;
-  opacity:.5;transition:opacity .18s,transform .16s cubic-bezier(.23,1,.32,1),border-color .18s;
-  padding:0 0 2px;
+  position:absolute;top:50%;transform:translateY(-50%);z-index:2;
+  width:40px;height:40px;border-radius:50%;border:1px solid rgba(255,255,255,.22);
+  background:rgba(8,10,16,.55);backdrop-filter:blur(6px);color:#fff;
+  font-size:21px;line-height:1;cursor:pointer;display:none;align-items:center;justify-content:center;
+  opacity:.85;transition:opacity .18s,transform .16s cubic-bezier(.23,1,.32,1),background .18s;
+  padding:0 0 2px;box-shadow:0 4px 16px rgba(0,0,0,.35);
 }
-.lb-nav.prev{left:20px} .lb-nav.next{right:20px}
+.lb-nav.prev{left:10px} .lb-nav.next{right:10px}
 #lightbox.show .lb-nav{display:flex}
 #lightbox.lb-single .lb-nav{display:none}
-.lb-nav:hover{opacity:1;border-color:var(--border-hover)}
-.lb-nav:active{transform:translateY(-50%) scale(.94)}
+.lb-nav:hover{opacity:1;background:rgba(8,10,16,.78)}
+.lb-nav:active{transform:translateY(-50%) scale(.92)}
 
 /* ===== 整页拖拽上传遮罩 ===== */
 #dropOverlay{
@@ -474,8 +475,8 @@ footer{margin-top:30px;text-align:center;color:var(--faint);font-size:12px;line-
   .viewbtn{padding:4px 8px;font-size:12px}
   .settings{gap:12px;font-size:12.5px}
   #lightbox{padding:16px}
-  .lb-nav{width:38px;height:38px;font-size:19px}
-  .lb-nav.prev{left:8px} .lb-nav.next{right:8px}
+  .lb-nav{width:34px;height:34px;font-size:18px}
+  .lb-nav.prev{left:6px} .lb-nav.next{right:6px}
   .do-box{padding:36px 28px}
   .lb-box img,.lb-box video{max-height:58vh}
   .lb-file{padding:28px 20px}
