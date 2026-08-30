@@ -33,6 +33,8 @@
 
 <!-- 灯箱 -->
 <div id="lightbox">
+  <button class="lb-nav prev" id="lbPrev" aria-label="上一个">‹</button>
+  <button class="lb-nav next" id="lbNext" aria-label="下一个">›</button>
   <div class="lb-box">
     <div id="lbMedia"></div>
     <div class="lb-meta" id="lbMeta"></div>
@@ -106,14 +108,14 @@
     <div id="dropzone">
       <div class="icon">🗂️</div>
       <p>点击选择 · 拖拽文件到这里 · 或 <kbd>Ctrl</kbd> + <kbd>V</kbd> 粘贴图片</p>
-      <p class="hint">图片 / 视频 / 压缩包 / 文档 任意文件，自动归类目录 ｜ 单文件最大 <span id="maxMBVal">100</span>MB<br>大文件自动分片上传 · 中断后重新选择同一文件即可断点续传 · 慢网络不限总时长</p>
+      <p class="hint" title="图片 / 视频 / 压缩包 / 文档 任意文件，自动归类目录；大文件自动分片上传，中断后重新选择同一文件即可断点续传，慢网络不限总时长">任意文件自动归类 · 单文件最大 <span id="maxMBVal">100</span>MB · 大文件分片上传可断点续传</p>
     </div>
     <input type="file" id="fileInput" multiple style="display:none">
 
     <div class="settings">
       <label class="switch"><input type="checkbox" id="keepName" checked> 保留原文件名（同名文件已存在时会上传失败）</label>
       <label class="switch"><input type="checkbox" id="webpToggle"> 图片智能压缩为 WebP（默认关闭，原图直传）</label>
-      <label>画质 <input type="range" id="quality" min="10" max="100" value="82"> <span id="qualityVal">82</span>%</label>
+      <label id="qualityRow">画质 <input type="range" id="quality" min="10" max="100" value="82"> <span id="qualityVal">82</span>%</label>
     </div>
   </div>
 
@@ -189,10 +191,20 @@
       </button>
     </div>
   </div>
+  <div class="up-agg"><i id="upAggBar"></i></div>
   <div class="up-body">
     <div class="up-clip">
       <div id="queue"></div>
     </div>
+  </div>
+</div>
+
+<!-- 整页拖拽上传遮罩：拖文件进入窗口任意位置时出现 -->
+<div id="dropOverlay">
+  <div class="do-box">
+    <div class="do-icon">📥</div>
+    <div class="do-text">松开即上传</div>
+    <div class="do-sub">图片 / 视频 / 其他文件将自动归类目录</div>
   </div>
 </div>
 

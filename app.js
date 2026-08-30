@@ -176,6 +176,10 @@
   else tryUnlock(localStorage.getItem(PWD_KEY)||'', true);
 
   quality.addEventListener('input',()=>qualityVal.textContent=quality.value);
+  // 画质设置仅在开启 WebP 压缩时出现（不压缩时它对上传毫无作用，纯视觉噪音）
+  function syncQualityRow(){ $('qualityRow').style.display=webpToggle.checked?'':'none'; }
+  webpToggle.addEventListener('change',syncQualityRow);
+  syncQualityRow();
 
   // ================= 保留原文件名（默认开启，记住选择） =================
   // 开启后文件以清洗后的原名存储（中文与字母数字 ._- 保留，其他字符替换为 -，最长 80 字符）；
@@ -218,7 +222,32 @@
   fi.addEventListener('change',()=>{ handleFiles([...fi.files]); fi.value=''; });
   ['dragover','dragenter'].forEach(e=>dz.addEventListener(e,ev=>{ev.preventDefault();dz.classList.add('dragover');}));
   ['dragleave','drop'].forEach(e=>dz.addEventListener(e,ev=>{ev.preventDefault();dz.classList.remove('dragover');}));
-  dz.addEventListener('drop',ev=>handleFiles([...ev.dataTransfer.files]));
+  // stopPropagation：落在虚线框内的拖放由这里处理，不再冒泡给整页拖拽，避免重复入队
+  dz.addEventListener('drop',ev=>{ ev.stopPropagation(); handleFiles([...ev.dataTransfer.files]); });
+
+  // ================= 整页拖拽上传 =================
+  // 拖文件进入窗口任意位置 → 全屏遮罩「松开即上传」。用 dragenter/leave 计数器对抗子元素抖动；
+  // 仅响应操作系统文件（types 含 Files），页面内拖拽（如网格文件拖到目录标签）不会触发。
+  const dropOverlay=$('dropOverlay');
+  let pageDragDepth=0;
+  const hasFiles=e=>e.dataTransfer && [...e.dataTransfer.types].includes('Files');
+  window.addEventListener('dragenter',e=>{
+    if(!hasFiles(e) || !mainApp.classList.contains('unlocked')) return;
+    pageDragDepth++;
+    dropOverlay.classList.add('show');
+  });
+  window.addEventListener('dragleave',()=>{
+    if(pageDragDepth>0) pageDragDepth--;
+    if(pageDragDepth===0) dropOverlay.classList.remove('show');
+  });
+  window.addEventListener('dragover',e=>{ if(pageDragDepth>0) e.preventDefault(); });
+  window.addEventListener('drop',e=>{
+    if(pageDragDepth===0) return;
+    e.preventDefault();
+    pageDragDepth=0;
+    dropOverlay.classList.remove('show');
+    if(e.dataTransfer && e.dataTransfer.files.length) handleFiles([...e.dataTransfer.files]);
+  });
   window.addEventListener('paste',ev=>{
     const files=[...(ev.clipboardData||[]).items].filter(i=>i.type.startsWith('image/')).map(i=>i.getAsFile());
     if(files.length) handleFiles(files);
@@ -230,7 +259,7 @@
   // ================= 上传管理器（右下角浮动面板） =================
   // 队列不再占用上传卡片内的位置：进度收进右下浮层，大文件长传时可继续浏览/管理云端文件。
   // 面板头部实时汇总进度，全部完成后露出「清空」入口；点击头部可折叠。
-  const upPanel=$('upPanel'), upStatus=$('upStatus'), upDot=$('upDot'), upClear=$('upClear');
+  const upPanel=$('upPanel'), upStatus=$('upStatus'), upDot=$('upDot'), upClear=$('upClear'), upAggBar=$('upAggBar');
   function pausedErr(){ const e=new Error('已暂停'); e.code='PAUSED'; return e; }
   function cancelledErr(){ const e=new Error('已取消'); e.code='CANCELLED'; return e; }
 
@@ -295,6 +324,10 @@
       if(el.classList.contains('paused')) pausedN++;
     }
     upPanel.classList.add('show');
+    // 聚合进度：所有队列项进度条宽度的均值，多文件时一眼看全局
+    let agg=0;
+    for(const el of items){ agg+=parseFloat(el.querySelector('.qbar>i').style.width)||0; }
+    upAggBar.style.width=(agg/items.length)+'%';
     if(uploading){
       upStatus.textContent='上传中 '+(done+fail)+'/'+items.length+(pausedN?' · 暂停 '+pausedN:'');
       upDot.className='up-dot active';
@@ -366,6 +399,7 @@
     const st=item.el.querySelector('.st'), bar=item.el.querySelector('.qbar>i');
     st.textContent=text; st.className='st'+(cls?' '+cls:'');
     bar.style.width=pct+'%';
+    updateUpHead(); // 进度变化时同步头部聚合进度条（300ms 节流内调用，开销可忽略）
   }
 
   // 图片压缩（默认关闭，原图直传；GIF / SVG 任何时候都不压缩，保留动图与矢量特性）
@@ -847,6 +881,7 @@
     const kw=(filter||'').toLowerCase();
     const base=kw? cloudItems.filter(f=>f.key.toLowerCase().includes(kw)) : cloudItems;
     const items=sortItems(base);
+    viewItems=items; // 灯箱左右切换的导航范围（与当前筛选/排序一致）
     $('cloudCount').textContent=kw? `（筛选出 ${items.length} / 共 ${cloudItems.length}）` : (cloudItems.length?`（${cloudItems.length}）`:'');
     if(!items.length){
       list.innerHTML='<div class="empty" style="grid-column:1/-1">'+(kw?'没有匹配的文件':'这个目录还是空的，传一个试试 ↑')+'</div>';
@@ -1049,8 +1084,16 @@
 
   // ================= 灯箱 =================
   let lbCurrent=null;
+  let viewItems=[]; // 当前筛选/排序后的列表，灯箱左右切换的导航范围
   const lbRenameRow=$('lbRenameRow'), lbRenameInput=$('lbRenameInput');
   function closeRename(){ lbRenameRow.style.display='none'; lbMeta.style.display=''; }
+  // 左右切换：在当前视图列表内循环；媒体重置与删除确认复位由 openLightbox 统一处理
+  function lbNav(d){
+    if(!lbCurrent || viewItems.length<2) return;
+    const i=viewItems.indexOf(lbCurrent);
+    if(i<0) return;
+    openLightbox(viewItems[(i+d+viewItems.length)%viewItems.length]);
+  }
   function openLightbox(f){
     lbCurrent=f;
     closeRename();
@@ -1070,6 +1113,7 @@
     $('lbCopy').textContent='复制'+({'url':'链接','md':'Markdown','html':'HTML','bbcode':'BBCode'}[curFmt]||'链接');
     lbMeta.innerHTML=escapeHtml(f.key)+'<br>'+(f.size?fmtSize(f.size)+' · ':'')+(f.time?new Date(f.time).toLocaleString():'');
     resetDeleteBtn();
+    lightbox.classList.toggle('lb-single', viewItems.length<2); // 单条列表不显示左右箭头
     lightbox.classList.add('show');
   }
   function closeLightbox(){
@@ -1080,7 +1124,16 @@
   }
   $('lbClose').addEventListener('click',closeLightbox);
   lightbox.addEventListener('click',e=>{ if(e.target===lightbox) closeLightbox(); });
-  window.addEventListener('keydown',e=>{ if(e.key==='Escape'){ closeQr(); closeLightbox(); } });
+  $('lbPrev').addEventListener('click',()=>lbNav(-1));
+  $('lbNext').addEventListener('click',()=>lbNav(1));
+  window.addEventListener('keydown',e=>{
+    if(e.key==='Escape'){ closeQr(); closeLightbox(); return; }
+    // ←/→ 切换上下个：仅灯箱打开且不在重命名输入、二维码弹窗未遮挡时生效
+    if(!lightbox.classList.contains('show') || qrModal.classList.contains('show')) return;
+    if(lbRenameRow.style.display!=='none') return;
+    if(e.key==='ArrowLeft') lbNav(-1);
+    else if(e.key==='ArrowRight') lbNav(1);
+  });
   $('lbCopy').addEventListener('click',()=>{ if(lbCurrent) copyText(formatLink(lbCurrent), FMT_LABEL[curFmt]); });
   // 格式按钮：选中格式、记住选择，并立即按该格式复制当前文件
   lbFmtRow.addEventListener('click',e=>{

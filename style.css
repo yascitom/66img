@@ -349,6 +349,41 @@ input[type=range]{accent-color:var(--accent);width:110px;vertical-align:middle}
 .fmt-btn:hover{color:var(--text);border-color:var(--border-hover)}
 .fmt-btn.active{background:var(--grad);color:#fff;border-color:transparent;box-shadow:0 2px 10px rgba(110,155,255,.35)}
 
+/* ===== 灯箱左右切换 ===== */
+.lb-nav{
+  position:fixed;top:50%;transform:translateY(-50%);z-index:92;
+  width:44px;height:44px;border-radius:50%;border:1px solid var(--border);
+  background:var(--toast-bg);backdrop-filter:blur(10px);color:var(--text);
+  font-size:22px;line-height:1;cursor:pointer;display:none;align-items:center;justify-content:center;
+  opacity:.5;transition:opacity .18s,transform .16s cubic-bezier(.23,1,.32,1),border-color .18s;
+  padding:0 0 2px;
+}
+.lb-nav.prev{left:20px} .lb-nav.next{right:20px}
+#lightbox.show .lb-nav{display:flex}
+#lightbox.lb-single .lb-nav{display:none}
+.lb-nav:hover{opacity:1;border-color:var(--border-hover)}
+.lb-nav:active{transform:translateY(-50%) scale(.94)}
+
+/* ===== 整页拖拽上传遮罩 ===== */
+#dropOverlay{
+  position:fixed;inset:0;z-index:150;background:var(--overlay);backdrop-filter:blur(8px);
+  display:flex;align-items:center;justify-content:center;pointer-events:none;
+  opacity:0;visibility:hidden;transition:opacity .18s cubic-bezier(.23,1,.32,1),visibility .18s;
+}
+#dropOverlay.show{opacity:1;visibility:visible}
+.do-box{
+  border:2px dashed rgba(110,155,255,.55);border-radius:24px;padding:56px 76px;text-align:center;
+  background:rgba(110,155,255,.06);transform:scale(.97);transition:transform .18s cubic-bezier(.23,1,.32,1);
+}
+#dropOverlay.show .do-box{transform:scale(1)}
+.do-icon{font-size:44px;filter:drop-shadow(0 6px 16px rgba(110,155,255,.45))}
+.do-text{font-size:17px;font-weight:600;letter-spacing:1px;margin-top:14px}
+.do-sub{font-size:12.5px;color:var(--muted);margin-top:8px;letter-spacing:.3px}
+
+/* ===== 面板头部聚合进度条 ===== */
+.up-agg{height:2px;background:var(--w8);overflow:hidden}
+.up-agg>i{display:block;height:100%;width:0;background:var(--grad);transition:width .3s}
+
 /* ===== Toast ===== */
 #toasts{position:fixed;top:22px;left:50%;transform:translateX(-50%);z-index:200;display:flex;flex-direction:column;gap:8px;align-items:center;pointer-events:none}
 .toast{
@@ -439,6 +474,9 @@ footer{margin-top:30px;text-align:center;color:var(--faint);font-size:12px;line-
   .viewbtn{padding:4px 8px;font-size:12px}
   .settings{gap:12px;font-size:12.5px}
   #lightbox{padding:16px}
+  .lb-nav{width:38px;height:38px;font-size:19px}
+  .lb-nav.prev{left:8px} .lb-nav.next{right:8px}
+  .do-box{padding:36px 28px}
   .lb-box img,.lb-box video{max-height:58vh}
   .lb-file{padding:28px 20px}
   .lb-meta{margin:10px 0;font-size:12px}
