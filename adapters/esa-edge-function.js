@@ -1,6 +1,6 @@
 // ============================================================
 // OSS 直传签名 —— 阿里云 ESA 边缘函数（Edge Routine）版
-// 路由：POST /api/sign、POST /api/list、POST /api/delete、POST /api/rename（改名/移动目录）、POST /api/multipart（大文件分片上传）、POST /api/upload（PicGo 兼容直传）
+// 路由：POST /api/sign、POST /api/list、POST /api/delete、POST /api/rename（改名/移动目录）、POST /api/multipart（大文件分片上传）
 // 部署：ESA 控制台 → 边缘函数 → 新建函数 → 粘贴本文件 → 发布 →
 //       在「函数路由/域名关联」中把你的管理站点域名关联到本函数
 // 注意：ESA 边缘函数若不支持控制台环境变量，直接在下方 CONFIG 里填写即可
@@ -553,182 +553,6 @@ async function handleSign(request) {
   });
 }
 
-// ================= PicGo / 第三方客户端兼容上传（POST /api/upload） =================
-// 接收 multipart/form-data 文件，服务端签名后直接 PutObject 写入 OSS，返回 PicGo 兼容 JSON。
-// 鉴权（任一）：Authorization: Bearer <密码或令牌> / x-yunwo-password 头 / 表单 password 或 auth 字段。
-// PicGo 配置：API 地址 https://你的域名/api/upload，POST 参数名 file，返回 JSON 路径 data.url，
-//   自定义请求头 {"Authorization":"Bearer 你的上传密码"}。
-// 默认保留原文件名（表单 keepname=0/false 关闭）；同名冲突返回 409，绝不静默覆盖。
-// 注意：文件内容会读入边缘函数内存，MAX_SIZE_MB 勿超过平台请求体限制。
-
-function picgoOk(url, key, name, size) {
-  return jsonResponse({ success: true, code: 200, message: 'ok', result: [url], data: { url, key, name, size } });
-}
-function picgoErr(message, status) {
-  return jsonResponse({ success: false, code: status, message, error: message }, status);
-}
-
-// 服务端签名 PutObject（V1 Header 签名）+ 签名自愈重试一次；x-oss-forbid-overwrite 写死
-async function putObject(key, bytes, contentType) {
-  const bucket = getEnv('OSS_BUCKET');
-  const endpoint = getEnv('OSS_ENDPOINT');
-  const url = `https://${bucket}.${endpoint}/${encodeKeyPath(key)}`;
-  const date = new Date().toUTCString();
-  // x-oss- 头按名称字典序进入待签串：x-oss-date < x-oss-forbid-overwrite
-  const myStringToSign = `PUT\n\n${contentType}\n\nx-oss-date:${date}\nx-oss-forbid-overwrite:true\n/${bucket}/${key}`;
-  const headers = {
-    'x-oss-date': date,
-    'x-oss-forbid-overwrite': 'true',
-    'Content-Type': contentType,
-    Authorization: `OSS ${getEnv('OSS_ACCESS_KEY_ID')}:${await hmacSha1Base64(getEnv('OSS_ACCESS_KEY_SECRET'), myStringToSign)}`,
-  };
-  let r = await fetchWithRetry(url, { method: 'PUT', headers, body: bytes });
-  let xml = await r.text();
-  if (!r.ok) {
-    const code = (xml.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
-    const ossString = (xml.match(/<StringToSign>([\s\S]*?)<\/StringToSign>/) || [])[1];
-    if (code === 'SignatureDoesNotMatch' && ossString) {
-      const ossStr = xmlUnescape(ossString);
-      headers.Authorization = `OSS ${getEnv('OSS_ACCESS_KEY_ID')}:${await hmacSha1Base64(getEnv('OSS_ACCESS_KEY_SECRET'), ossStr)}`;
-      r = await fetchWithRetry(url, { method: 'PUT', headers, body: bytes });
-      xml = await r.text();
-      if (!r.ok) {
-        const code2 = (xml.match(/<Code>([^<]+)<\/Code>/) || [])[1] || r.status;
-        throw new Error(`OSS PUT 请求失败：` + code2);
-      }
-    } else if (code === 'FileAlreadyExists') {
-      const err = new Error('同名文件已存在，请先重命名或删除旧文件');
-      err.code = 'CONFLICT';
-      throw err;
-    } else {
-      throw new Error(`OSS PUT 请求失败：` + code);
-    }
-  }
-}
-
-// ------------------------------------------------------------
-// 带字节硬上限读取请求体：超限即中断流，返回 null。
-// Content-Length 缺失或谎报时也不能超过 cap（防未鉴权大体积消耗）。
-// ------------------------------------------------------------
-async function readBodyCapped(request, cap) {
-  if (!request.body) return new Uint8Array(0);
-  const reader = request.body.getReader();
-  const chunks = [];
-  let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > cap) {
-      await reader.cancel().catch(() => {});
-      return null;
-    }
-    chunks.push(value);
-  }
-  const buf = new Uint8Array(total);
-  let off = 0;
-  for (const c of chunks) { buf.set(c, off); off += c.byteLength; }
-  return buf;
-}
-
-async function handleUpload(request) {
-  const required = ['OSS_ACCESS_KEY_ID', 'OSS_ACCESS_KEY_SECRET', 'OSS_BUCKET', 'OSS_ENDPOINT', 'PUBLIC_URL_BASE'];
-  for (const k of required) {
-    if (!getEnv(k)) return picgoErr(`服务端缺少配置 ${k}`, 500);
-  }
-  const cfgErr = authConfigError();
-  if (cfgErr) return picgoErr(cfgErr, 500);
-
-  const maxMB = parseInt(getEnv('MAX_SIZE_MB'), 10) || 100;
-  const maxSize = maxMB * 1024 * 1024;
-  // Content-Type 预检（不花大钱，先做）
-  const ct = request.headers.get('Content-Type') || '';
-  if (!ct.toLowerCase().startsWith('multipart/form-data')) {
-    return picgoErr('Content-Type 必须是 multipart/form-data', 400);
-  }
-  // Content-Length 快路径：超限直接 413（multipart 开销放宽 2MB）；头不可信时由 readBodyCapped 硬上限兜底
-  const cl = parseInt(request.headers.get('Content-Length') || '0', 10);
-  if (cl > maxSize + 2 * 1024 * 1024) {
-    return picgoErr(`文件大小超限（上限 ${maxMB}MB）`, 413);
-  }
-
-  // 鉴权前置：头里有凭据（Bearer / x-yunwo-password）先验证，通过才读 body，
-  // 杜绝未鉴权的大体积 multipart 白耗内存与函数时长
-  const creds = { password: '', auth: '' };
-  const m = (request.headers.get('Authorization') || '').match(/^Bearer\s+(.+)$/i);
-  if (m) { creds.password = m[1]; creds.auth = m[1]; }
-  const hdrPwd = request.headers.get('x-yunwo-password');
-  if (hdrPwd) creds.password = hdrPwd;
-  if (creds.password.length > 128 || creds.auth.length > 2048) {
-    return picgoErr('鉴权参数非法', 400);
-  }
-  const hasHeaderCreds = !!(creds.password || creds.auth);
-  let authed = false;
-  if (hasHeaderCreds) {
-    if (!(await verifyAuth(creds))) {
-      await new Promise(r => setTimeout(r, 400));
-      return picgoErr('上传密码错误或会话已过期', 401);
-    }
-    authed = true;
-  }
-
-  // 读取 body：字节硬上限，超限即中断（无 CL / CL 谎报也过不了）
-  const buf = await readBodyCapped(request, maxSize + 2 * 1024 * 1024);
-  if (!buf) {
-    return picgoErr(`文件大小超限（上限 ${maxMB}MB）`, 413);
-  }
-  let form;
-  try {
-    form = await new Response(buf, { headers: { 'Content-Type': ct } }).formData();
-  } catch {
-    return picgoErr('表单解析失败', 400);
-  }
-
-  // 头里没带凭据时回退到表单字段鉴权（兼容无法自定义头的客户端）
-  if (!authed) {
-    const fPwd = form.get('password');
-    const fAuth = form.get('auth');
-    if (typeof fPwd === 'string' && fPwd) creds.password = fPwd;
-    if (typeof fAuth === 'string' && fAuth) creds.auth = fAuth;
-    if (creds.password.length > 128 || creds.auth.length > 2048) {
-      return picgoErr('鉴权参数非法', 400);
-    }
-    if (!(await verifyAuth(creds))) {
-      await new Promise(r => setTimeout(r, 400));
-      return picgoErr('上传密码错误或会话已过期', 401);
-    }
-  }
-  // 取文件：优先 file 字段（PicGo 默认），否则取第一个文件字段
-  let file = form.get('file');
-  if (!(file instanceof File)) {
-    for (const v of form.values()) {
-      if (v instanceof File) { file = v; break; }
-    }
-  }
-  if (!(file instanceof File) || file.size <= 0) {
-    return picgoErr('未收到文件（表单中需要一个文件字段，推荐命名为 file）', 400);
-  }
-  if (file.size > maxSize) {
-    return picgoErr(`文件大小超限（上限 ${maxMB}MB）`, 413);
-  }
-
-  const kn = String(form.get('keepname') || '').toLowerCase();
-  const keepName = kn !== '0' && kn !== 'false';
-  const key = makeObjectKey(file.name || 'file.bin', keepName);
-
-  try {
-    const bytes = await file.arrayBuffer();
-    const mime = (file.type || 'application/octet-stream').slice(0, 100);
-    await putObject(key, bytes, mime);
-    const url = `${getEnv('PUBLIC_URL_BASE').replace(/\/$/, '')}/${encodeKeyPath(key)}`;
-    return picgoOk(url, key, file.name, file.size);
-  } catch (e) {
-    if (e.code === 'CONFLICT') return picgoErr(e.message, 409);
-    console.error('upload failed:', e && e.message); // 细节留在平台日志，不外泄
-    return picgoErr('OSS 写入失败', 502);
-  }
-}
-
 // ================= 分片上传（Multipart Upload） =================
 // action=init      服务端调 InitiateMultipartUpload，返回 uploadId + key
 // action=part      为单个分片签发预签名 URL（1 小时有效），浏览器直传 OSS
@@ -1015,8 +839,7 @@ async function handleRequest(request) {
   if (url.pathname === '/api/delete' && request.method === 'POST') return handleDelete(request);
   if (url.pathname === '/api/rename' && request.method === 'POST') return handleRename(request);
   if (url.pathname === '/api/multipart' && request.method === 'POST') return handleMultipart(request);
-  if (url.pathname === '/api/upload' && request.method === 'POST') return handleUpload(request);
-  return jsonResponse({ error: 'Not Found. 接口：POST /api/sign、POST /api/list、POST /api/delete、POST /api/rename、POST /api/multipart、POST /api/upload。' }, 404);
+  return jsonResponse({ error: 'Not Found. 接口：POST /api/sign、POST /api/list、POST /api/delete、POST /api/rename、POST /api/multipart。' }, 404);
 }
 
 // ESA 边缘函数入口（Service Worker 风格）
