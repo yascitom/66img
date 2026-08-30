@@ -349,21 +349,31 @@ input[type=range]{accent-color:var(--accent);width:110px;vertical-align:middle}
 .fmt-btn:hover{color:var(--text);border-color:var(--border-hover)}
 .fmt-btn.active{background:var(--grad);color:#fff;border-color:transparent;box-shadow:0 2px 10px rgba(110,155,255,.35)}
 
-/* ===== 灯箱左右切换（箭头浮在媒体左右边缘，始终跟着内容走） ===== */
+/* ===== 灯箱左右切换（箭头在媒体外侧贴边，不遮挡画面；窄屏退回图内） ===== */
 .lb-stage{position:relative;display:inline-block;max-width:100%}
 .lb-nav{
-  position:absolute;top:50%;transform:translateY(-50%);z-index:2;
-  width:40px;height:40px;border-radius:50%;border:1px solid rgba(255,255,255,.22);
-  background:rgba(8,10,16,.55);backdrop-filter:blur(6px);color:#fff;
+  position:absolute;top:50%;z-index:2;
+  width:40px;height:40px;border-radius:50%;border:1px solid var(--border);
+  background:var(--toast-bg);backdrop-filter:blur(10px);color:var(--text);
   font-size:21px;line-height:1;cursor:pointer;display:none;align-items:center;justify-content:center;
-  opacity:.85;transition:opacity .18s,transform .16s cubic-bezier(.23,1,.32,1),background .18s;
+  opacity:.85;transition:opacity .18s,transform .16s cubic-bezier(.23,1,.32,1),background .18s,border-color .18s;
   padding:0 0 2px;box-shadow:0 4px 16px rgba(0,0,0,.35);
 }
-.lb-nav.prev{left:10px} .lb-nav.next{right:10px}
+.lb-nav.prev{left:0;transform:translate(calc(-100% - 16px),-50%)}
+.lb-nav.next{right:0;transform:translate(calc(100% + 16px),-50%)}
 #lightbox.show .lb-nav{display:flex}
 #lightbox.lb-single .lb-nav{display:none}
-.lb-nav:hover{opacity:1;background:rgba(8,10,16,.78)}
-.lb-nav:active{transform:translateY(-50%) scale(.92)}
+.lb-nav:hover{opacity:1;border-color:var(--border-hover)}
+.lb-nav.prev:active{transform:translate(calc(-100% - 16px),-50%) scale(.92)}
+.lb-nav.next:active{transform:translate(calc(100% + 16px),-50%) scale(.92)}
+/* 窄屏媒体两侧放不下：退回图内浮层样式 */
+@media (max-width:880px){
+  .lb-nav{width:36px;height:36px;font-size:19px;border-color:rgba(255,255,255,.22);background:rgba(8,10,16,.55);color:#fff}
+  .lb-nav.prev{left:6px;transform:translateY(-50%)}
+  .lb-nav.next{right:6px;transform:translateY(-50%)}
+  .lb-nav.prev:active{transform:translateY(-50%) scale(.92)}
+  .lb-nav.next:active{transform:translateY(-50%) scale(.92)}
+}
 
 /* ===== 整页拖拽上传遮罩 ===== */
 #dropOverlay{
